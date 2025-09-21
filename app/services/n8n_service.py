@@ -1,590 +1,590 @@
+# services/n8n_service.py
 """
-services/n8n_service.py
-Serviço de integração com workflows n8n
+Serviço de integração com workflows n8n para o sistema AIDE.
+Gerencia comunicação com workflows de ingestão, chat e monitoramento.
 """
 
-import requests
-import json
 import asyncio
-import aiohttp
-from typing import Dict, List, Optional, Any
-from datetime import datetime
+import json
 import logging
-from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import Enum
+from typing import Dict, List, Optional, Any, Union
+from functools import wraps
 import os
-from functools import lru_cache
-import hashlib
 
-# Configuração de logging
+import aiohttp
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 class WorkflowType(Enum):
-    """Tipos de workflows disponíveis"""
-    DATA_INGESTION = "data_ingestion"
-    CHAT_PROCESSING = "chat_processing"
+    """Tipos de workflows disponíveis no n8n."""
+    DATA_INGESTION = "data-ingestion"
+    CHAT_PROCESSING = "chat"
     MONITORING = "monitoring"
     BACKUP = "backup"
-    REPORT_GENERATION = "report_generation"
 
-@dataclass
-class WorkflowConfig:
-    """Configuração de um workflow n8n"""
-    workflow_id: str
-    webhook_url: str
-    api_key: Optional[str] = None
-    timeout: int = 30
-    retry_count: int = 3
-    retry_delay: int = 2
+
+class N8NConfig:
+    """Configuração do n8n."""
+    def __init__(self):
+        self.base_url = os.getenv("N8N_BASE_URL", "http://localhost:5678")
+        self.api_key = os.getenv("N8N_API_KEY", "")
+        self.webhook_token = os.getenv("N8N_WEBHOOK_TOKEN", "")
+        
+        # Webhook IDs dos workflows
+        self.webhooks = {
+            WorkflowType.DATA_INGESTION: "aide-data-ingestion-manual",
+            WorkflowType.CHAT_PROCESSING: "aide-chat-processor",
+            WorkflowType.MONITORING: "aide-metrics-receiver"
+        }
+        
+        # Timeouts
+        self.timeout = int(os.getenv("N8N_DEFAULT_TIMEOUT", "30"))
+        self.max_retries = int(os.getenv("N8N_MAX_RETRIES", "3"))
+
 
 class N8NService:
-    """Serviço principal de integração com n8n"""
+    """Serviço principal de integração com n8n."""
     
-    def __init__(self, base_url: str = None, api_key: str = None):
-        """
-        Inicializa o serviço n8n
+    def __init__(self, config: Optional[N8NConfig] = None):
+        self.config = config or N8NConfig()
+        self.session = self._create_session()
+        self._async_session = None
         
-        Args:
-            base_url: URL base do n8n (ex: http://localhost:5678)
-            api_key: API key para autenticação
-        """
-        self.base_url = base_url or os.getenv('N8N_BASE_URL', 'http://localhost:5678')
-        self.api_key = api_key or os.getenv('N8N_API_KEY', '')
+    def _create_session(self) -> requests.Session:
+        """Criar sessão HTTP com retry e configurações."""
+        session = requests.Session()
         
-        # Configurações dos workflows
-        self.workflows = {
-            WorkflowType.DATA_INGESTION: WorkflowConfig(
-                workflow_id=os.getenv('N8N_WORKFLOW_DATA_INGESTION', 'aide-data-ingestion'),
-                webhook_url=f"{self.base_url}/webhook/data-ingestion",
-                api_key=self.api_key
-            ),
-            WorkflowType.CHAT_PROCESSING: WorkflowConfig(
-                workflow_id=os.getenv('N8N_WORKFLOW_CHAT', 'aide-chat-processing'),
-                webhook_url=f"{self.base_url}/webhook/chat/process",
-                api_key=self.api_key
-            ),
-            WorkflowType.MONITORING: WorkflowConfig(
-                workflow_id=os.getenv('N8N_WORKFLOW_MONITORING', 'aide-monitoring'),
-                webhook_url=f"{self.base_url}/webhook/monitoring",
-                api_key=self.api_key
-            )
-        }
+        # Configurar retry strategy
+        retry_strategy = Retry(
+            total=self.config.max_retries,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
         
         # Headers padrão
-        self.headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        }
+        session.headers.update({
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        })
         
-        if self.api_key:
-            self.headers['X-N8N-API-KEY'] = self.api_key
+        if self.config.api_key:
+            session.headers["X-N8N-API-KEY"] = self.config.api_key
+        if self.config.webhook_token:
+            session.headers["X-Webhook-Token"] = self.config.webhook_token
+            
+        return session
     
-    # =================== Métodos de Chat ===================
+    async def _get_async_session(self) -> aiohttp.ClientSession:
+        """Obter ou criar sessão assíncrona."""
+        if not self._async_session:
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+            if self.config.api_key:
+                headers["X-N8N-API-KEY"] = self.config.api_key
+            if self.config.webhook_token:
+                headers["X-Webhook-Token"] = self.config.webhook_token
+                
+            self._async_session = aiohttp.ClientSession(headers=headers)
+        return self._async_session
     
-    async def process_chat_message(self, 
-                                  message: str, 
-                                  user_id: str,
-                                  session_id: Optional[str] = None,
-                                  metadata: Optional[Dict] = None) -> Dict:
+    def _build_webhook_url(self, workflow_type: WorkflowType, path: str = "") -> str:
+        """Construir URL completa do webhook."""
+        webhook_id = self.config.webhooks.get(workflow_type)
+        if not webhook_id:
+            raise ValueError(f"Webhook não configurado para {workflow_type}")
+        
+        base_path = f"{self.config.base_url}/webhook"
+        
+        if workflow_type == WorkflowType.DATA_INGESTION:
+            return f"{base_path}/data-ingestion/trigger"
+        elif workflow_type == WorkflowType.CHAT_PROCESSING:
+            return f"{base_path}/chat/process"
+        elif workflow_type == WorkflowType.MONITORING:
+            if "metrics" in path:
+                return f"{base_path}/monitoring/metrics"
+            elif "alert" in path:
+                return f"{base_path}/monitoring/alert"
+            return f"{base_path}/monitoring"
+        
+        return f"{base_path}/{workflow_type.value}{path}"
+    
+    # ============= Data Ingestion Methods =============
+    
+    async def trigger_data_ingestion(
+        self, 
+        datasets: List[str],
+        priority: str = "normal",
+        force_update: bool = False
+    ) -> Dict[str, Any]:
         """
-        Processa uma mensagem de chat através do workflow n8n
+        Disparar workflow de ingestão de dados.
+        
+        Args:
+            datasets: Lista de dataset IDs para ingerir
+            priority: Prioridade (critical, high, normal)
+            force_update: Forçar atualização mesmo se dados recentes
+        
+        Returns:
+            Resposta do workflow
+        """
+        try:
+            url = self._build_webhook_url(WorkflowType.DATA_INGESTION)
+            payload = {
+                "datasets": datasets,
+                "priority": priority,
+                "force_update": force_update,
+                "triggered_by": "python_service",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            session = await self._get_async_session()
+            async with session.post(
+                url, 
+                json=payload, 
+                timeout=self.config.timeout
+            ) as response:
+                result = await response.json()
+                
+                if response.status == 200:
+                    logger.info(f"Ingestão iniciada para datasets: {datasets}")
+                    return {
+                        "success": True,
+                        "execution_id": result.get("execution_id"),
+                        "datasets": datasets,
+                        "status": "started"
+                    }
+                else:
+                    logger.error(f"Erro ao disparar ingestão: {response.status}")
+                    return {
+                        "success": False,
+                        "error": f"HTTP {response.status}",
+                        "details": result
+                    }
+                    
+        except Exception as e:
+            logger.error(f"Erro na ingestão: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def trigger_data_ingestion_sync(self, datasets: List[str], **kwargs) -> Dict[str, Any]:
+        """Versão síncrona do trigger_data_ingestion."""
+        return asyncio.run(self.trigger_data_ingestion(datasets, **kwargs))
+    
+    # ============= Chat Processing Methods =============
+    
+    async def process_chat_message(
+        self,
+        message: str,
+        user_id: str,
+        session_id: Optional[str] = None,
+        metadata: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """
+        Processar mensagem de chat via workflow n8n.
         
         Args:
             message: Mensagem do usuário
             user_id: ID do usuário
             session_id: ID da sessão (opcional)
             metadata: Metadados adicionais
-            
+        
         Returns:
-            Resposta processada do workflow
+            Resposta processada com texto e possíveis visualizações
         """
-        workflow_config = self.workflows[WorkflowType.CHAT_PROCESSING]
-        
-        payload = {
-            'message': message,
-            'user_id': user_id,
-            'session_id': session_id or self._generate_session_id(user_id),
-            'timestamp': datetime.now().isoformat(),
-            'source': 'streamlit',
-            'metadata': metadata or {}
-        }
-        
         try:
-            response = await self._execute_webhook_async(
-                workflow_config.webhook_url,
-                payload,
-                workflow_config.timeout
-            )
+            url = self._build_webhook_url(WorkflowType.CHAT_PROCESSING)
+            payload = {
+                "message": message,
+                "user_id": user_id,
+                "session_id": session_id or f"session_{datetime.now().timestamp()}",
+                "source": "streamlit",
+                "language": "pt-BR",
+                "timezone": "America/Sao_Paulo",
+                "timestamp": datetime.now().isoformat()
+            }
             
-            # Processar resposta
-            if response.get('success'):
-                return {
-                    'success': True,
-                    'response': response.get('response', {}),
-                    'session_id': response.get('session_id'),
-                    'processing_time': response.get('metadata', {}).get('processing_time')
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': response.get('error', 'Unknown error'),
-                    'fallback_response': self._generate_fallback_response(message)
-                }
+            if metadata:
+                payload.update(metadata)
+            
+            session = await self._get_async_session()
+            async with session.post(
+                url,
+                json=payload,
+                timeout=self.config.timeout + 20  # Timeout maior para IA
+            ) as response:
+                result = await response.json()
                 
-        except Exception as e:
-            logger.error(f"Erro ao processar mensagem de chat: {e}")
+                if response.status == 200 and result.get("success"):
+                    logger.info(f"Chat processado para user {user_id}")
+                    return result
+                else:
+                    logger.error(f"Erro no chat: {response.status}")
+                    return {
+                        "success": False,
+                        "error": f"HTTP {response.status}",
+                        "fallback_response": self._generate_fallback_response(message)
+                    }
+                    
+        except asyncio.TimeoutError:
+            logger.warning("Timeout no processamento do chat")
             return {
-                'success': False,
-                'error': str(e),
-                'fallback_response': self._generate_fallback_response(message)
+                "success": False,
+                "error": "Timeout",
+                "fallback_response": "Desculpe, o processamento está demorando. Tente novamente."
+            }
+        except Exception as e:
+            logger.error(f"Erro no chat: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "fallback_response": self._generate_fallback_response(message)
             }
     
-    def process_chat_message_sync(self, 
-                                 message: str, 
-                                 user_id: str,
-                                 session_id: Optional[str] = None) -> Dict:
-        """Versão síncrona do processamento de chat"""
-        return asyncio.run(self.process_chat_message(message, user_id, session_id))
+    def process_chat_message_sync(self, message: str, user_id: str, **kwargs) -> Dict[str, Any]:
+        """Versão síncrona do process_chat_message."""
+        return asyncio.run(self.process_chat_message(message, user_id, **kwargs))
     
-    # =================== Métodos de Ingestão de Dados ===================
+    def _generate_fallback_response(self, message: str) -> str:
+        """Gerar resposta fallback para erros."""
+        message_lower = message.lower()
+        
+        if any(word in message_lower for word in ["oi", "olá", "bom dia", "boa tarde", "boa noite"]):
+            return "Olá! Sou o AIDE. No momento estou com dificuldades técnicas, mas em breve estarei disponível para ajudá-lo com dados do setor elétrico."
+        elif "ajuda" in message_lower or "help" in message_lower:
+            return "Posso ajudar com análises de carga de energia, CMO/PLD, bandeiras tarifárias e outros dados do setor elétrico. Por favor, tente novamente em alguns instantes."
+        else:
+            return "Desculpe, estou temporariamente indisponível. Por favor, tente novamente em alguns instantes."
     
-    async def trigger_data_ingestion(self, 
-                                    datasets: Optional[List[str]] = None,
-                                    force_update: bool = False) -> Dict:
+    # ============= Monitoring Methods =============
+    
+    async def send_metrics(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Dispara o workflow de ingestão de dados
+        Enviar métricas para o workflow de monitoramento.
         
         Args:
-            datasets: Lista de datasets específicos para atualizar
-            force_update: Forçar atualização mesmo se dados recentes
+            metrics: Dicionário com métricas do sistema
+        
+        Returns:
+            Confirmação de recebimento
+        """
+        try:
+            url = self._build_webhook_url(WorkflowType.MONITORING, "/metrics")
             
+            session = await self._get_async_session()
+            async with session.post(
+                url,
+                json=metrics,
+                timeout=10
+            ) as response:
+                if response.status == 200:
+                    logger.debug(f"Métricas enviadas: {metrics.get('workflow_name')}")
+                    return {"success": True, "status": "sent"}
+                else:
+                    return {"success": False, "error": f"HTTP {response.status}"}
+                    
+        except Exception as e:
+            logger.error(f"Erro ao enviar métricas: {str(e)}")
+            return {"success": False, "error": str(e)}
+    
+    async def send_alert(self, severity: str, alert_type: str, details: Dict) -> Dict[str, Any]:
+        """
+        Enviar alerta para o workflow de monitoramento.
+        
+        Args:
+            severity: critical, high, medium, low
+            alert_type: Tipo do alerta
+            details: Detalhes do alerta
+        
+        Returns:
+            Confirmação de envio
+        """
+        try:
+            url = self._build_webhook_url(WorkflowType.MONITORING, "/alert")
+            payload = {
+                "severity": severity,
+                "type": alert_type,
+                "details": details,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            session = await self._get_async_session()
+            async with session.post(
+                url,
+                json=payload,
+                timeout=10
+            ) as response:
+                if response.status == 200:
+                    logger.info(f"Alerta {severity} enviado: {alert_type}")
+                    return {"success": True, "status": "sent"}
+                else:
+                    return {"success": False, "error": f"HTTP {response.status}"}
+                    
+        except Exception as e:
+            logger.error(f"Erro ao enviar alerta: {str(e)}")
+            return {"success": False, "error": str(e)}
+    
+    def get_system_health(self) -> Dict[str, Any]:
+        """
+        Obter relatório de saúde do sistema do cache Redis.
+        
+        Returns:
+            Relatório de saúde com score e métricas
+        """
+        try:
+            # Aqui você integraria com Redis para pegar o cache
+            # Por enquanto, retorno simulado
+            import redis
+            r = redis.Redis(host='localhost', port=6379, decode_responses=True)
+            
+            health_data = r.get("health:latest")
+            if health_data:
+                return json.loads(health_data)
+            else:
+                return self._get_default_health_report()
+                
+        except Exception as e:
+            logger.error(f"Erro ao obter saúde: {str(e)}")
+            return self._get_default_health_report()
+    
+    def _get_default_health_report(self) -> Dict[str, Any]:
+        """Relatório de saúde padrão."""
+        return {
+            "health_score": 0,
+            "status": "unknown",
+            "timestamp": datetime.now().isoformat(),
+            "metrics": [],
+            "message": "Sistema de monitoramento indisponível"
+        }
+    
+    # ============= Utility Methods =============
+    
+    async def get_execution_status(self, execution_id: str) -> Dict[str, Any]:
+        """
+        Verificar status de uma execução de workflow.
+        
+        Args:
+            execution_id: ID da execução
+        
         Returns:
             Status da execução
         """
-        workflow_config = self.workflows[WorkflowType.DATA_INGESTION]
-        
-        payload = {
-            'trigger': 'manual',
-            'datasets': datasets or ['all'],
-            'force_update': force_update,
-            'timestamp': datetime.now().isoformat()
-        }
-        
         try:
-            # Executar workflow via API do n8n
-            response = await self._execute_workflow_async(
-                workflow_config.workflow_id,
-                payload
-            )
+            url = f"{self.config.base_url}/api/v1/executions/{execution_id}"
             
-            return {
-                'success': True,
-                'execution_id': response.get('executionId'),
-                'status': 'started',
-                'message': f"Ingestão iniciada para {len(datasets or [])} datasets"
-            }
-            
-        except Exception as e:
-            logger.error(f"Erro ao disparar ingestão: {e}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def check_data_freshness(self) -> Dict:
-        """
-        Verifica a atualização dos dados através do cache
-        
-        Returns:
-            Status de atualização dos datasets
-        """
-        try:
-            # Buscar do cache Redis via API
-            response = requests.get(
-                f"{self.base_url}/api/v1/cache/data-freshness",
-                headers=self.headers,
-                timeout=5
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                return self._get_fallback_freshness()
-                
-        except Exception as e:
-            logger.error(f"Erro ao verificar freshness: {e}")
-            return self._get_fallback_freshness()
-    
-    # =================== Métodos de Monitoramento ===================
-    
-    def get_system_health(self) -> Dict:
-        """
-        Obtém o status de saúde do sistema
-        
-        Returns:
-            Relatório de saúde do sistema
-        """
-        try:
-            # Buscar do cache Redis
-            response = requests.get(
-                f"{self.base_url}/api/v1/cache/health:latest",
-                headers=self.headers,
-                timeout=5
-            )
-            
-            if response.status_code == 200:
-                health_data = response.json()
-                return self._format_health_response(health_data)
-            else:
-                return self._get_fallback_health()
-                
-        except Exception as e:
-            logger.error(f"Erro ao obter saúde do sistema: {e}")
-            return self._get_fallback_health()
-    
-    async def trigger_monitoring_check(self) -> Dict:
-        """
-        Dispara verificação manual de monitoramento
-        
-        Returns:
-            Resultado da verificação
-        """
-        workflow_config = self.workflows[WorkflowType.MONITORING]
-        
-        payload = {
-            'trigger': 'manual',
-            'check_all': True,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        try:
-            response = await self._execute_webhook_async(
-                workflow_config.webhook_url,
-                payload,
-                timeout=10
-            )
-            
-            return {
-                'success': True,
-                'health_score': response.get('health_score', 0),
-                'status': response.get('status', 'unknown'),
-                'metrics': response.get('metrics', [])
-            }
-            
-        except Exception as e:
-            logger.error(f"Erro ao disparar monitoramento: {e}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    # =================== Métodos de Execução de Workflows ===================
-    
-    async def execute_workflow(self, 
-                              workflow_id: str, 
-                              data: Dict,
-                              wait_for_completion: bool = False) -> Dict:
-        """
-        Executa um workflow específico via API
-        
-        Args:
-            workflow_id: ID do workflow
-            data: Dados para o workflow
-            wait_for_completion: Aguardar conclusão
-            
-        Returns:
-            Resultado da execução
-        """
-        url = f"{self.base_url}/api/v1/workflows/{workflow_id}/execute"
-        
-        payload = {
-            'data': data,
-            'waitForCompletion': wait_for_completion
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=self.headers) as response:
+            session = await self._get_async_session()
+            async with session.get(url, timeout=10) as response:
                 if response.status == 200:
-                    return await response.json()
+                    data = await response.json()
+                    return {
+                        "success": True,
+                        "status": data.get("status"),
+                        "start_time": data.get("startedAt"),
+                        "end_time": data.get("stoppedAt"),
+                        "execution_time": data.get("executionTime"),
+                        "data": data
+                    }
                 else:
-                    raise Exception(f"Erro ao executar workflow: {response.status}")
+                    return {
+                        "success": False,
+                        "error": f"HTTP {response.status}"
+                    }
+                    
+        except Exception as e:
+            logger.error(f"Erro ao verificar execução: {str(e)}")
+            return {"success": False, "error": str(e)}
     
-    async def _execute_workflow_async(self, workflow_id: str, data: Dict) -> Dict:
-        """Executa workflow de forma assíncrona"""
-        return await self.execute_workflow(workflow_id, data, wait_for_completion=False)
-    
-    async def _execute_webhook_async(self, 
-                                    webhook_url: str, 
-                                    data: Dict,
-                                    timeout: int = 30) -> Dict:
+    def get_execution_history(
+        self, 
+        workflow_type: WorkflowType, 
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
         """
-        Executa webhook de forma assíncrona
-        
-        Args:
-            webhook_url: URL do webhook
-            data: Dados para enviar
-            timeout: Timeout em segundos
-            
-        Returns:
-            Resposta do webhook
-        """
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(
-                    webhook_url, 
-                    json=data, 
-                    headers=self.headers,
-                    timeout=aiohttp.ClientTimeout(total=timeout)
-                ) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    else:
-                        error_text = await response.text()
-                        raise Exception(f"Webhook error {response.status}: {error_text}")
-                        
-            except asyncio.TimeoutError:
-                raise Exception(f"Webhook timeout após {timeout} segundos")
-            except Exception as e:
-                raise Exception(f"Erro no webhook: {str(e)}")
-    
-    # =================== Métodos de Histórico e Logs ===================
-    
-    def get_execution_history(self, 
-                             workflow_type: WorkflowType,
-                             limit: int = 10) -> List[Dict]:
-        """
-        Obtém histórico de execuções de um workflow
+        Obter histórico de execuções de um workflow.
         
         Args:
             workflow_type: Tipo do workflow
             limit: Número máximo de execuções
-            
+        
         Returns:
             Lista de execuções
         """
-        workflow_config = self.workflows[workflow_type]
-        
         try:
-            response = requests.get(
-                f"{self.base_url}/api/v1/executions",
-                params={
-                    'workflowId': workflow_config.workflow_id,
-                    'limit': limit
-                },
-                headers=self.headers,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                executions = response.json().get('data', [])
-                return self._format_executions(executions)
-            else:
-                return []
-                
+            # Implementação simplificada - integraria com API do n8n
+            return []
         except Exception as e:
-            logger.error(f"Erro ao obter histórico: {e}")
+            logger.error(f"Erro ao obter histórico: {str(e)}")
             return []
     
-    def get_execution_details(self, execution_id: str) -> Dict:
-        """
-        Obtém detalhes de uma execução específica
-        
-        Args:
-            execution_id: ID da execução
-            
-        Returns:
-            Detalhes da execução
-        """
-        try:
-            response = requests.get(
-                f"{self.base_url}/api/v1/executions/{execution_id}",
-                headers=self.headers,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                return {}
+    async def close(self):
+        """Fechar conexões."""
+        if self._async_session:
+            await self._async_session.close()
+        self.session.close()
+
+
+# ============= Decoradores e Helpers =============
+
+def n8n_webhook(workflow_type: WorkflowType):
+    """
+    Decorador para funções que disparam workflows n8n.
+    
+    Exemplo:
+        @n8n_webhook(WorkflowType.DATA_INGESTION)
+        async def process_data(data):
+            return {"processed": data}
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            service = get_n8n_service()
+            try:
+                # Executar função
+                result = await func(*args, **kwargs)
                 
-        except Exception as e:
-            logger.error(f"Erro ao obter detalhes da execução: {e}")
-            return {}
-    
-    # =================== Métodos Auxiliares ===================
-    
-    def _generate_session_id(self, user_id: str) -> str:
-        """Gera ID de sessão único"""
-        timestamp = datetime.now().isoformat()
-        hash_input = f"{user_id}_{timestamp}"
-        return hashlib.md5(hash_input.encode()).hexdigest()[:16]
-    
-    def _generate_fallback_response(self, message: str) -> str:
-        """Gera resposta fallback para chat"""
-        responses = {
-            'greeting': "Olá! Sou o AIDE. Como posso ajudá-lo com dados do setor elétrico?",
-            'help': "Posso ajudar com análises de carga, CMO/PLD, bandeiras tarifárias e mais.",
-            'error': "Desculpe, estou com dificuldades técnicas. Por favor, tente novamente.",
-            'default': "Entendi sua pergunta. Vou processar essa informação para você."
-        }
-        
-        message_lower = message.lower()
-        
-        if any(word in message_lower for word in ['oi', 'olá', 'bom dia', 'boa tarde']):
-            return responses['greeting']
-        elif any(word in message_lower for word in ['ajuda', 'help', 'como']):
-            return responses['help']
-        else:
-            return responses['default']
-    
-    def _get_fallback_freshness(self) -> Dict:
-        """Retorna status de freshness fallback"""
-        return {
-            'carga_energia': {
-                'last_update': 'Desconhecido',
-                'status': 'unknown'
-            },
-            'cmo_pld': {
-                'last_update': 'Desconhecido',
-                'status': 'unknown'
-            }
-        }
-    
-    def _get_fallback_health(self) -> Dict:
-        """Retorna saúde fallback do sistema"""
-        return {
-            'health_score': 0,
-            'status': 'unknown',
-            'message': 'Não foi possível obter status do sistema',
-            'metrics': []
-        }
-    
-    def _format_health_response(self, health_data: Dict) -> Dict:
-        """Formata resposta de saúde"""
-        return {
-            'health_score': health_data.get('health_score', 0),
-            'status': health_data.get('status', 'unknown'),
-            'metrics': health_data.get('metrics', []),
-            'recommendations': health_data.get('recommendations', []),
-            'last_check': health_data.get('timestamp', datetime.now().isoformat())
-        }
-    
-    def _format_executions(self, executions: List[Dict]) -> List[Dict]:
-        """Formata lista de execuções"""
-        formatted = []
-        
-        for exec in executions:
-            formatted.append({
-                'id': exec.get('id'),
-                'status': exec.get('status'),
-                'started_at': exec.get('startedAt'),
-                'finished_at': exec.get('finishedAt'),
-                'execution_time': exec.get('executionTime'),
-                'error': exec.get('error')
-            })
-        
-        return formatted
-    
-    # =================== Context Manager ===================
-    
-    async def __aenter__(self):
-        """Entrada do context manager"""
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Saída do context manager"""
-        # Limpar recursos se necessário
-        pass
+                # Enviar para n8n
+                if workflow_type == WorkflowType.DATA_INGESTION:
+                    await service.trigger_data_ingestion(
+                        datasets=result.get("datasets", []),
+                        priority=result.get("priority", "normal")
+                    )
+                    
+                return result
+                
+            except Exception as e:
+                logger.error(f"Erro no webhook {workflow_type}: {str(e)}")
+                raise
+                
+        return wrapper
+    return decorator
 
-# =================== Funções Helper para Streamlit ===================
 
-@lru_cache(maxsize=128)
+# ============= Factory Functions =============
+
+_service_instance = None
+
 def get_n8n_service() -> N8NService:
     """
-    Retorna instância singleton do serviço n8n
+    Obter instância singleton do serviço n8n.
     
     Returns:
         Instância do N8NService
     """
-    return N8NService()
+    global _service_instance
+    if not _service_instance:
+        _service_instance = N8NService()
+    return _service_instance
 
-def process_chat_streamlit(message: str, user_id: str, session_id: str = None) -> Dict:
+
+# ============= Funções de Conveniência para Streamlit =============
+
+def process_chat_streamlit(
+    message: str, 
+    user_id: str, 
+    session_id: Optional[str] = None
+) -> Dict[str, Any]:
     """
-    Processa mensagem de chat para uso em Streamlit
+    Processar chat de forma síncrona para Streamlit.
     
     Args:
         message: Mensagem do usuário
         user_id: ID do usuário
         session_id: ID da sessão
-        
+    
     Returns:
         Resposta processada
     """
     service = get_n8n_service()
-    return service.process_chat_message_sync(message, user_id, session_id)
+    return service.process_chat_message_sync(message, user_id, session_id=session_id)
 
-def check_system_health_streamlit() -> Dict:
+
+def trigger_ingestion_streamlit(datasets: List[str]) -> Dict[str, Any]:
     """
-    Verifica saúde do sistema para dashboard Streamlit
+    Disparar ingestão de forma síncrona para Streamlit.
+    
+    Args:
+        datasets: Lista de datasets
     
     Returns:
-        Status de saúde
+        Status da ingestão
+    """
+    service = get_n8n_service()
+    return service.trigger_data_ingestion_sync(datasets)
+
+
+def check_system_health_streamlit() -> Dict[str, Any]:
+    """
+    Verificar saúde do sistema para Streamlit.
+    
+    Returns:
+        Relatório de saúde
     """
     service = get_n8n_service()
     return service.get_system_health()
 
-def trigger_data_update_streamlit(datasets: List[str] = None) -> Dict:
-    """
-    Dispara atualização de dados via Streamlit
+
+# ============= Classes de Resposta Tipadas =============
+
+class ChatResponse:
+    """Resposta estruturada do chat."""
     
-    Args:
-        datasets: Lista de datasets para atualizar
-        
-    Returns:
-        Status da atualização
-    """
-    service = get_n8n_service()
-    return asyncio.run(service.trigger_data_ingestion(datasets))
-
-# =================== Decoradores para Integração ===================
-
-def n8n_webhook(workflow_type: WorkflowType):
-    """
-    Decorador para funções que disparam webhooks n8n
+    def __init__(self, data: Dict[str, Any]):
+        self.success = data.get("success", False)
+        self.text = data.get("response", {}).get("text", "")
+        self.intent = data.get("response", {}).get("intent")
+        self.confidence = data.get("response", {}).get("confidence", 0)
+        self.visualization = data.get("response", {}).get("visualization")
+        self.suggestions = data.get("response", {}).get("suggestions", [])
+        self.data = data.get("response", {}).get("data")
+        self.metadata = data.get("response", {}).get("metadata", {})
+        self.error = data.get("error")
     
-    Args:
-        workflow_type: Tipo do workflow a ser executado
-    """
-    def decorator(func):
-        async def wrapper(*args, **kwargs):
-            # Executar função original
-            result = await func(*args, **kwargs)
-            
-            # Disparar webhook n8n
-            service = get_n8n_service()
-            workflow_config = service.workflows[workflow_type]
-            
-            try:
-                webhook_result = await service._execute_webhook_async(
-                    workflow_config.webhook_url,
-                    result
-                )
-                result['n8n_execution'] = webhook_result
-            except Exception as e:
-                logger.error(f"Erro no webhook n8n: {e}")
-                result['n8n_error'] = str(e)
-            
-            return result
-        
-        return wrapper
-    return decorator
+    @property
+    def has_visualization(self) -> bool:
+        """Verificar se tem visualização."""
+        return self.visualization is not None
+    
+    @property
+    def processing_time(self) -> int:
+        """Tempo de processamento em ms."""
+        return self.metadata.get("processing_time_ms", 0)
 
-# Exemplo de uso do decorador
-@n8n_webhook(WorkflowType.DATA_INGESTION)
-async def update_dataset_with_workflow(dataset_id: str, data: Dict) -> Dict:
-    """Exemplo de função que dispara workflow n8n"""
-    return {
-        'dataset_id': dataset_id,
-        'data': data,
-        'timestamp': datetime.now().isoformat()
-    }
+
+class HealthReport:
+    """Relatório de saúde estruturado."""
+    
+    def __init__(self, data: Dict[str, Any]):
+        self.health_score = data.get("health_score", 0)
+        self.status = data.get("status", "unknown")
+        self.timestamp = data.get("timestamp")
+        self.statistics = data.get("statistics", {})
+        self.metrics = data.get("metrics_summary", [])
+        self.recommendations = data.get("recommendations", [])
+    
+    @property
+    def is_healthy(self) -> bool:
+        """Sistema está saudável."""
+        return self.health_score >= 80
+    
+    @property
+    def is_critical(self) -> bool:
+        """Sistema em estado crítico."""
+        return self.status == "critical" or self.health_score < 50
+    
+    def get_alerts(self) -> List[Dict]:
+        """Obter alertas ativos."""
+        return [m for m in self.metrics if m.get("status") != "ok"]
