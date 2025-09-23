@@ -1,0 +1,490 @@
+{
+  "name": "AIDE - Processamento de Chat IA",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chat/process",
+        "responseMode": "responseNode",
+        "options": {
+          "cors": {
+            "allowedOrigins": "*"
+          }
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Chat Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "webhookId": "aide-chat-processor"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validação e preparação de entrada\nconst input = $input.first().json;\n\nif (!input.message || !input.user_id) {\n  throw new Error('Mensagem e user_id são obrigatórios');\n}\n\n// Sanitização básica\nfunction sanitizeInput(str) {\n  return str\n    .trim()\n    .substring(0, 2000)\n    .replace(/<script[^>]*>.*?<\\/script>/gi, '')\n    .replace(/<[^>]+>/g, '');\n}\n\nconst context = {\n  user_id: input.user_id,\n  session_id: input.session_id || `session_${Date.now()}`,\n  message: sanitizeInput(input.message),\n  original_message: input.message,\n  timestamp: new Date().toISOString(),\n  request_id: `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,\n  metadata: {\n    source: input.source || 'web',\n    language: input.language || 'pt-BR',\n    timezone: input.timezone || 'America/Sao_Paulo',\n    client_info: input.client_info || {},\n    force_refresh: input.force_refresh || false\n  }\n};\n\nreturn {json: context};"
+      },
+      "id": "validate-input",
+      "name": "Validar e Preparar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "key": "=session:{{$json.session_id}}",
+        "options": {}
+      },
+      "id": "get-session-cache",
+      "name": "Buscar Sessão Cache",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [650, 200],
+      "credentials": {
+        "redis": {
+          "id": "{{credentials.redis}}",
+          "name": "AIDE Redis"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  id, \n  session_id, \n  user_id, \n  role, \n  content, \n  metadata, \n  created_at \nFROM chat_history \nWHERE session_id = '{{$json.session_id}}' \nORDER BY created_at DESC \nLIMIT 10",
+        "options": {}
+      },
+      "id": "get-chat-history",
+      "name": "Buscar Histórico Chat",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [650, 400],
+      "credentials": {
+        "postgres": {
+          "id": "{{credentials.postgres}}",
+          "name": "AIDE PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const message = $json.message.toLowerCase();\nconst context = $json;\n\n// Configuração de intents com patterns melhorados\nconst intents = {\n  carga_energia: {\n    keywords: ['carga', 'consumo', 'demanda', 'energia', 'mw', 'megawatt', 'load'],\n    patterns: [\n      /(?:qual|quanto).{0,20}(?:carga|consumo|demanda)/i,\n      /carga.{0,20}(?:atual|agora|hoje)/i,\n      /energia.{0,20}(?:consumida|utilizada)/i\n    ],\n    confidence: 0\n  },\n  cmo_pld: {\n    keywords: ['cmo', 'pld', 'preco', 'preço', 'custo', 'marginal', 'operacao', 'operação'],\n    patterns: [\n      /(?:qual|quanto).{0,20}(?:cmo|pld|preço|preco)/i,\n      /custo.{0,20}marginal/i,\n      /preço.{0,20}energia/i\n    ],\n    confidence: 0\n  },\n  bandeiras: {\n    keywords: ['bandeira', 'tarifa', 'tarifaria', 'tarifária', 'verde', 'amarela', 'vermelha'],\n    patterns: [\n      /bandeira.{0,20}(?:tarifaria|tarifária|atual)/i,\n      /(?:verde|amarela|vermelha).{0,20}(?:bandeira|tarifa)/i\n    ],\n    confidence: 0\n  },\n  geracao: {\n    keywords: ['geracao', 'geração', 'producao', 'produção', 'usina', 'solar', 'eolica', 'eólica', 'hidreletrica', 'hidrelétrica', 'termica', 'térmica'],\n    patterns: [\n      /(?:geracao|geração|producao|produção).{0,20}(?:energia|eletrica|elétrica)/i,\n      /(?:solar|eolica|eólica|hidro|termica|térmica)/i\n    ],\n    confidence: 0\n  },\n  comparacao: {\n    keywords: ['comparar', 'versus', 'diferenca', 'diferença', 'melhor', 'pior', 'ranking', 'maior', 'menor'],\n    patterns: [\n      /compar(?:ar|ação|e)/i,\n      /(?:melhor|pior|maior|menor).{0,20}(?:região|subsistema|período)/i,\n      /diferenç?a.{0,20}entre/i\n    ],\n    confidence: 0\n  },\n  previsao: {\n    keywords: ['previsao', 'previsão', 'projecao', 'projeção', 'futuro', 'tendencia', 'tendência', 'proximo', 'próximo', 'estimativa'],\n    patterns: [\n      /(?:previsao|previsão|projecao|projeção)/i,\n      /(?:proximo|próximo|futuro).{0,20}(?:mes|mês|semana|dia|ano)/i,\n      /tendênc?ia/i\n    ],\n    confidence: 0\n  }\n};\n\n// Calcular confidence scores\nfor (const [intent, data] of Object.entries(intents)) {\n  // Check keywords\n  data.keywords.forEach(keyword => {\n    if (message.includes(keyword)) {\n      data.confidence += 0.3;\n    }\n  });\n  \n  // Check patterns (mais peso)\n  if (data.patterns) {\n    data.patterns.forEach(pattern => {\n      if (pattern.test(message)) {\n        data.confidence += 0.5;\n      }\n    });\n  }\n  \n  // Normalizar confidence (máximo 1.0)\n  data.confidence = Math.min(1.0, data.confidence);\n}\n\n// Identificar intent primário\nconst sortedIntents = Object.entries(intents)\n  .sort((a, b) => b[1].confidence - a[1].confidence);\n  \nconst primaryIntent = sortedIntents[0];\nconst secondaryIntents = sortedIntents.slice(1, 3)\n  .filter(([_, data]) => data.confidence > 0.3);\n\n// Extração de entidades melhorada\nconst entities = {\n  regions: [],\n  periods: [],\n  metrics: [],\n  values: [],\n  comparisons: []\n};\n\n// Regiões/Subsistemas\nconst regionMap = {\n  'sudeste': ['sudeste', 'se', 'sp', 'rj', 'mg', 'es'],\n  'sul': ['sul', 's', 'pr', 'sc', 'rs'],\n  'nordeste': ['nordeste', 'ne', 'ba', 'pe', 'ce', 'rn', 'pb', 'al', 'se', 'ma', 'pi'],\n  'norte': ['norte', 'n', 'am', 'pa', 'to', 'ro', 'ac', 'ap', 'rr'],\n  'centro-oeste': ['centro-oeste', 'centro oeste', 'co', 'mt', 'ms', 'go', 'df']\n};\n\nfor (const [region, keywords] of Object.entries(regionMap)) {\n  if (keywords.some(kw => message.includes(kw))) {\n    entities.regions.push(region);\n  }\n}\n\n// Períodos temporais\nconst periodPatterns = [\n  { pattern: /hoje/gi, value: 'today', type: 'day' },\n  { pattern: /ontem/gi, value: 'yesterday', type: 'day' },\n  { pattern: /agora/gi, value: 'now', type: 'realtime' },\n  { pattern: /(?:ultima|última) semana/gi, value: 'last_week', type: 'week' },\n  { pattern: /(?:ultimo|último) (?:mes|mês)/gi, value: 'last_month', type: 'month' },\n  { pattern: /este (?:mes|mês)/gi, value: 'this_month', type: 'month' },\n  { pattern: /este ano/gi, value: 'this_year', type: 'year' },\n  { pattern: /\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}/gi, value: 'specific_date', type: 'date' },\n  { pattern: /(janeiro|fevereiro|março|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)/gi, value: 'month_name', type: 'month' }\n];\n\nperiodPatterns.forEach(({pattern, value, type}) => {\n  const matches = message.match(pattern);\n  if (matches) {\n    entities.periods.push({\n      value: value,\n      type: type,\n      text: matches[0]\n    });\n  }\n});\n\n// Valores numéricos\nconst valuePattern = /\\d+(?:[.,]\\d+)?\\s*(?:mw|gwh|r\\$|reais)?/gi;\nconst valueMatches = message.match(valuePattern);\nif (valueMatches) {\n  entities.values = valueMatches;\n}\n\n// Análise de necessidade de dados\nconst requiresData = primaryIntent[1].confidence > 0.3 && !message.match(/^(oi|olá|bom dia|boa tarde|boa noite|tchau|obrigado)/i);\nconst isGreeting = /^(oi|olá|bom dia|boa tarde|boa noite|hi|hello)/i.test(message);\nconst isHelp = /^(ajuda|help|como|tutorial|o que você|o que voce)/i.test(message);\nconst isFarewell = /(tchau|até|ate logo|obrigado|valeu)/i.test(message);\n\n// Verificar se precisa dados mais recentes\nconst needsFreshData = context.metadata.force_refresh || \n  entities.periods.some(p => ['now', 'realtime', 'today'].includes(p.value));\n\nreturn {json: {\n  ...context,\n  analysis: {\n    primary_intent: primaryIntent[0],\n    confidence: primaryIntent[1].confidence,\n    secondary_intents: secondaryIntents.map(([name, data]) => ({\n      name,\n      confidence: data.confidence\n    })),\n    all_intents: intents,\n    entities: entities,\n    requires_data: requiresData,\n    needs_fresh_data: needsFreshData,\n    is_greeting: isGreeting,\n    is_help: isHelp,\n    is_farewell: isFarewell,\n    complexity: entities.regions.length > 1 || entities.periods.length > 1 ? 'complex' : 'simple'\n  }\n}};"
+      },
+      "id": "analyze-intent",
+      "name": "Analisar Intenção",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.analysis.requires_data}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "needs-data-check",
+      "name": "Precisa Dados?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  query_template,\n  parameters,\n  dataset_id,\n  description\nFROM query_templates\nWHERE intent_type = '{{$json.analysis.primary_intent}}'\n  AND active = true\nORDER BY priority DESC\nLIMIT 1",
+        "options": {}
+      },
+      "id": "get-query-template",
+      "name": "Buscar Template Query",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1250, 150],
+      "credentials": {
+        "postgres": {
+          "id": "{{credentials.postgres}}",
+          "name": "AIDE PostgreSQL"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const analysis = $json.analysis;\nconst intent = analysis.primary_intent;\nconst entities = analysis.entities;\nconst template = $('get-query-template').first()?.json;\n\nlet query = '';\nlet params = [];\n\n// Determinar período\nlet startDate = new Date();\nlet endDate = new Date();\n\nif (entities.periods.length > 0) {\n  const period = entities.periods[0];\n  switch(period.value) {\n    case 'today':\n      startDate.setHours(0, 0, 0, 0);\n      break;\n    case 'yesterday':\n      startDate.setDate(startDate.getDate() - 1);\n      endDate = new Date(startDate);\n      break;\n    case 'last_week':\n      startDate.setDate(startDate.getDate() - 7);\n      break;\n    case 'last_month':\n      startDate.setMonth(startDate.getMonth() - 1);\n      break;\n    case 'this_month':\n      startDate.setDate(1);\n      startDate.setHours(0, 0, 0, 0);\n      break;\n    case 'this_year':\n      startDate = new Date(startDate.getFullYear(), 0, 1);\n      break;\n    default:\n      startDate.setDate(startDate.getDate() - 7);\n  }\n} else {\n  // Padrão: últimos 7 dias\n  startDate.setDate(startDate.getDate() - 7);\n}\n\n// Usar template se disponível\nif (template && template.query_template) {\n  query = template.query_template;\n  // Substituir placeholders\n  query = query.replace('{{start_date}}', startDate.toISOString());\n  query = query.replace('{{end_date}}', endDate.toISOString());\n  \n  if (entities.regions.length > 0) {\n    query = query.replace('{{regions}}', entities.regions.map(r => `'${r}'`).join(','));\n  }\n} else {\n  // Queries padrão por intent\n  switch(intent) {\n    case 'carga_energia':\n      query = `\n        WITH hourly_data AS (\n          SELECT \n            DATE_TRUNC('hour', period_start) as period,\n            subsystem,\n            AVG(value) as avg_load,\n            MAX(value) as max_load,\n            MIN(value) as min_load,\n            STDDEV(value) as std_dev,\n            COUNT(*) as data_points\n          FROM data_records\n          WHERE dataset_id IN ('carga_energia', 'load')\n            AND period_start BETWEEN $1 AND $2\n            ${entities.regions.length > 0 ? \"AND LOWER(subsystem) = ANY($3)\" : \"\"}\n          GROUP BY period, subsystem\n        ),\n        stats AS (\n          SELECT\n            subsystem,\n            AVG(avg_load) as total_avg,\n            MAX(max_load) as peak_load,\n            MIN(min_load) as min_load\n          FROM hourly_data\n          GROUP BY subsystem\n        )\n        SELECT * FROM hourly_data\n        UNION ALL\n        SELECT \n          NULL as period,\n          subsystem || '_stats' as subsystem,\n          total_avg as avg_load,\n          peak_load as max_load,\n          min_load,\n          0 as std_dev,\n          0 as data_points\n        FROM stats\n        ORDER BY period DESC NULLS LAST, subsystem`;\n      \n      params = [startDate, endDate];\n      if (entities.regions.length > 0) {\n        params.push(entities.regions);\n      }\n      break;\n      \n    case 'cmo_pld':\n      query = `\n        WITH daily_data AS (\n          SELECT \n            DATE_TRUNC('day', period_start) as period,\n            subsystem,\n            AVG(value) as avg_price,\n            MAX(value) as max_price,\n            MIN(value) as min_price,\n            JSONB_AGG(\n              DISTINCT processed_data->>'patamar'\n            ) as patamares\n          FROM data_records\n          WHERE dataset_id IN ('cmo_pld', 'cmo', 'pld')\n            AND period_start BETWEEN $1 AND $2\n            ${entities.regions.length > 0 ? \"AND LOWER(subsystem) = ANY($3)\" : \"\"}\n          GROUP BY period, subsystem\n        )\n        SELECT \n          period,\n          subsystem,\n          avg_price,\n          max_price,\n          min_price,\n          patamares,\n          RANK() OVER (PARTITION BY period ORDER BY avg_price DESC) as price_rank\n        FROM daily_data\n        ORDER BY period DESC, subsystem`;\n      \n      params = [startDate, endDate];\n      if (entities.regions.length > 0) {\n        params.push(entities.regions);\n      }\n      break;\n      \n    case 'bandeiras':\n      query = `\n        SELECT \n          period_start as period,\n          value as tariff_value,\n          processed_data->>'bandeira' as flag_color,\n          processed_data->>'vigencia' as validity,\n          LAG(value) OVER (ORDER BY period_start) as previous_value,\n          value - LAG(value) OVER (ORDER BY period_start) as change\n        FROM data_records\n        WHERE dataset_id = 'bandeiras_tarifarias'\n          AND period_start >= $1\n        ORDER BY period_start DESC\n        LIMIT 12`;\n      \n      params = [startDate];\n      break;\n      \n    default:\n      // Query genérica\n      query = `\n        SELECT \n          dataset_id,\n          period_start,\n          subsystem,\n          metric_name,\n          value,\n          unit,\n          processed_data\n        FROM data_records\n        WHERE period_start BETWEEN $1 AND $2\n        ORDER BY period_start DESC\n        LIMIT 100`;\n      \n      params = [startDate, endDate];\n  }\n}\n\n// Verificar se dados estão desatualizados\nconst checkFreshness = analysis.needs_fresh_data;\n\nreturn {json: {\n  query: query,\n  params: params,\n  context: $json,\n  dataset_id: template?.dataset_id || intent,\n  check_freshness: checkFreshness\n}};"
+      },
+      "id": "build-query",
+      "name": "Construir Query SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.check_freshness}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-data-freshness",
+      "name": "Verificar Freshness?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [1650, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  MAX(period_start) as last_data,\n  EXTRACT(EPOCH FROM (NOW() - MAX(period_start)))/3600 as hours_old\nFROM data_records\nWHERE dataset_id = '{{$json.dataset_id}}'\n  AND period_start >= NOW() - INTERVAL '48 hours'",
+        "options": {}
+      },
+      "id": "check-data-age",
+      "name": "Verificar Idade Dados",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1850, 100],
+      "credentials": {
+        "postgres": {
+          "id": "{{credentials.postgres}}",
+          "name": "AIDE PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.hours_old}}",
+              "rightValue": 24,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "data-too-old",
+      "name": "Dados Antigos?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [2050, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/data-ingestion/trigger",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify({datasets: [$json.dataset_id], priority: 'high', triggered_by: 'chat_request'})}}",
+        "options": {}
+      },
+      "id": "trigger-ingestion",
+      "name": "Disparar Ingestão",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2250, 50],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{$json.query}}",
+        "additionalFields": {},
+        "options": {
+          "queryBatching": "independently",
+          "queryParams": "={{$json.params}}"
+        }
+      },
+      "id": "execute-query",
+      "name": "Executar Query",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2050, 200],
+      "credentials": {
+        "postgres": {
+          "id": "{{credentials.postgres}}",
+          "name": "AIDE PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const userMessage = $('validate-input').first().json.message;\nconst analysis = $('analyze-intent').first().json.analysis;\nconst sessionCache = $('get-session-cache').first()?.json || {};\nconst chatHistory = $('get-chat-history').all().map(item => item.json) || [];\nconst queryResults = $('execute-query').all().map(item => item.json) || [];\nconst dataAge = $('check-data-age').first()?.json || {};\n\n// Construir histórico de conversação\nconst conversationHistory = chatHistory\n  .filter(msg => msg.role && msg.content)\n  .map(msg => ({\n    role: msg.role === 'user' ? 'user' : 'assistant',\n    content: msg.content\n  }))\n  .reverse()\n  .slice(-10); // Últimas 10 mensagens\n\n// Processar resultados dos dados\nlet dataContext = '';\nlet statistics = {};\n\nif (queryResults && queryResults.length > 0) {\n  const data = queryResults.flat();\n  \n  if (analysis.primary_intent === 'carga_energia') {\n    const statsData = data.filter(row => row.subsystem && row.subsystem.includes('_stats'));\n    const timeData = data.filter(row => row.period);\n    \n    if (statsData.length > 0) {\n      const avgLoad = statsData.reduce((sum, row) => sum + (row.avg_load || 0), 0) / statsData.length;\n      const maxLoad = Math.max(...statsData.map(row => row.max_load || 0));\n      \n      statistics = {\n        avg_load: avgLoad.toFixed(2),\n        peak_load: maxLoad.toFixed(2),\n        data_points: timeData.length,\n        subsystems: [...new Set(statsData.map(row => row.subsystem.replace('_stats', '')))]\n      };\n      \n      dataContext = `Dados de Carga de Energia:\\n`;\n      dataContext += `- Carga média: ${avgLoad.toFixed(2)} MWmed\\n`;\n      dataContext += `- Carga máxima: ${maxLoad.toFixed(2)} MWmed\\n`;\n      dataContext += `- Subsistemas analisados: ${statistics.subsystems.join(', ')}\\n`;\n      dataContext += `- Período: ${timeData.length} registros`;\n    }\n  } else if (analysis.primary_intent === 'cmo_pld') {\n    const avgPrice = data.reduce((sum, row) => sum + (row.avg_price || 0), 0) / data.length;\n    const maxPrice = Math.max(...data.map(row => row.max_price || 0));\n    const minPrice = Math.min(...data.map(row => row.min_price || 0));\n    \n    statistics = {\n      avg_price: avgPrice.toFixed(2),\n      max_price: maxPrice.toFixed(2),\n      min_price: minPrice.toFixed(2),\n      subsystems: [...new Set(data.map(row => row.subsystem))].filter(Boolean)\n    };\n    \n    dataContext = `Dados de CMO/PLD:\\n`;\n    dataContext += `- CMO médio: R$ ${avgPrice.toFixed(2)}/MWh\\n`;\n    dataContext += `- CMO máximo: R$ ${maxPrice.toFixed(2)}/MWh\\n`;\n    dataContext += `- CMO mínimo: R$ ${minPrice.toFixed(2)}/MWh`;\n  } else if (analysis.primary_intent === 'bandeiras') {\n    const latestFlag = data[0];\n    if (latestFlag) {\n      statistics = {\n        current_flag: latestFlag.flag_color,\n        current_value: latestFlag.tariff_value,\n        change: latestFlag.change || 0\n      };\n      \n      dataContext = `Bandeira Tarifária Atual:\\n`;\n      dataContext += `- Cor: ${latestFlag.flag_color}\\n`;\n      dataContext += `- Valor: R$ ${latestFlag.tariff_value}/100kWh\\n`;\n      dataContext += `- Variação: ${latestFlag.change ? (latestFlag.change > 0 ? '+' : '') + latestFlag.change.toFixed(2) : 'N/A'}`;\n    }\n  }\n}\n\n// Informação sobre freshness dos dados\nlet freshnessContext = '';\nif (dataAge.hours_old) {\n  if (dataAge.hours_old > 24) {\n    freshnessContext = `⚠️ Atenção: Os dados mais recentes têm ${Math.round(dataAge.hours_old)} horas. Uma atualização foi solicitada.`;\n  } else {\n    freshnessContext = `✓ Dados atualizados há ${Math.round(dataAge.hours_old)} horas.`;\n  }\n}\n\n// Construir prompt para IA\nconst systemPrompt = `Você é o AIDE, um assistente especializado em dados do setor elétrico brasileiro. \nSempre responda em português brasileiro de forma clara, precisa e educativa.\nUse os dados fornecidos para fundamentar suas respostas.\nQuando apropriado, sugira análises adicionais ou perguntas relacionadas.`;\n\nconst contextPrompt = `Contexto da Conversa:\n- Intenção identificada: ${analysis.primary_intent} (confiança: ${(analysis.confidence * 100).toFixed(1)}%)\n- Entidades detectadas: ${JSON.stringify(analysis.entities)}\n${dataContext ? `\\nDados Disponíveis:\\n${dataContext}` : ''}\n${freshnessContext ? `\\n${freshnessContext}` : ''}`;\n\n// Adicionar contexto da sessão se disponível\nlet sessionContext = '';\nif (sessionCache.preferences) {\n  sessionContext = `\\nPreferências do usuário: ${JSON.stringify(sessionCache.preferences)}`;\n}\n\nreturn {json: {\n  model: 'gpt-4-turbo-preview',\n  messages: [\n    { role: 'system', content: systemPrompt },\n    { role: 'system', content: contextPrompt + sessionContext },\n    ...conversationHistory,\n    { role: 'user', content: userMessage }\n  ],\n  temperature: 0.7,\n  max_tokens: 1500,\n  functions: [\n    {\n      name: 'generate_visualization',\n      description: 'Gerar configuração para visualização de dados',\n      parameters: {\n        type: 'object',\n        properties: {\n          chart_type: {\n            type: 'string',\n            enum: ['line', 'bar', 'pie', 'area', 'scatter', 'heatmap']\n          },\n          title: { type: 'string' },\n          data: { type: 'object' }\n        },\n        required: ['chart_type', 'title', 'data']\n      }\n    }\n  ],\n  metadata: {\n    session_id: $('validate-input').first().json.session_id,\n    user_id: $('validate-input').first().json.user_id,\n    request_id: $('validate-input').first().json.request_id,\n    intent: analysis.primary_intent,\n    statistics: statistics,\n    data_age: dataAge\n  }\n}};"
+      },
+      "id": "prepare-ai-context",
+      "name": "Preparar Contexto IA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2250, 300]
+    },
+    {
+      "parameters": {
+        "resource": "chatCompletion",
+        "operation": "create",
+        "model": "={{$json.model}}",
+        "messages": "={{$json.messages}}",
+        "options": {
+          "temperature": "={{$json.temperature}}",
+          "maxTokens": "={{$json.max_tokens}}",
+          "functions": "={{$json.functions}}"
+        }
+      },
+      "id": "openai-completion",
+      "name": "Claude/GPT Response",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.4,
+      "position": [2450, 300],
+      "credentials": {
+        "openAiApi": {
+          "id": "{{credentials.openai}}",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const aiResponse = $json;\nconst metadata = $('prepare-ai-context').first().json.metadata;\nconst queryData = $('execute-query').all().map(item => item.json);\nconst startTime = new Date($('validate-input').first().json.timestamp);\n\n// Extrair resposta e função (se houver)\nlet responseContent = '';\nlet functionCall = null;\n\nif (aiResponse.choices && aiResponse.choices[0]) {\n  const choice = aiResponse.choices[0];\n  responseContent = choice.message.content || '';\n  \n  if (choice.message.function_call) {\n    try {\n      functionCall = {\n        name: choice.message.function_call.name,\n        arguments: JSON.parse(choice.message.function_call.arguments)\n      };\n    } catch (e) {\n      console.error('Error parsing function call:', e);\n    }\n  }\n}\n\n// Determinar necessidade de visualização\nconst needsVisualization = functionCall?.name === 'generate_visualization' ||\n  responseContent.toLowerCase().includes('gráfico') ||\n  responseContent.toLowerCase().includes('visualização') ||\n  metadata.intent === 'comparacao' ||\n  (queryData && queryData.length > 5);\n\n// Preparar dados para visualização\nfunction prepareVisualizationData(intent, data) {\n  if (!data || data.length === 0) return null;\n  \n  const flatData = data.flat();\n  \n  if (intent === 'carga_energia') {\n    const timeData = flatData\n      .filter(row => row.period && !row.subsystem?.includes('_stats'))\n      .sort((a, b) => new Date(a.period) - new Date(b.period));\n    \n    if (timeData.length === 0) return null;\n    \n    const subsystems = [...new Set(timeData.map(row => row.subsystem))];\n    \n    return {\n      type: 'line',\n      title: 'Evolução da Carga de Energia',\n      data: {\n        labels: [...new Set(timeData.map(row => new Date(row.period).toISOString()))],\n        datasets: subsystems.map(subsystem => ({\n          label: subsystem,\n          data: timeData\n            .filter(row => row.subsystem === subsystem)\n            .map(row => row.avg_load),\n          borderColor: getColor(subsystem),\n          fill: false\n        }))\n      },\n      options: {\n        responsive: true,\n        scales: {\n          y: {\n            title: {\n              display: true,\n              text: 'Carga (MWmed)'\n            }\n          }\n        }\n      }\n    };\n  } else if (intent === 'cmo_pld') {\n    const priceData = flatData\n      .filter(row => row.period)\n      .sort((a, b) => new Date(a.period) - new Date(b.period));\n    \n    return {\n      type: 'bar',\n      title: 'CMO/PLD por Subsistema',\n      data: {\n        labels: [...new Set(priceData.map(row => row.subsystem))],\n        datasets: [{\n          label: 'Preço Médio (R$/MWh)',\n          data: priceData.map(row => row.avg_price),\n          backgroundColor: 'rgba(54, 162, 235, 0.5)'\n        }]\n      }\n    };\n  } else if (intent === 'bandeiras') {\n    const flagData = flatData.slice(0, 12);\n    \n    return {\n      type: 'line',\n      title: 'Histórico de Bandeiras Tarifárias',\n      data: {\n        labels: flagData.map(row => new Date(row.period).toLocaleDateString('pt-BR')),\n        datasets: [{\n          label: 'Valor (R$/100kWh)',\n          data: flagData.map(row => row.tariff_value),\n          borderColor: 'rgb(255, 99, 132)',\n          stepped: true\n        }]\n      }\n    };\n  }\n  \n  return null;\n}\n\n// Função auxiliar para cores\nfunction getColor(subsystem) {\n  const colors = {\n    'Sudeste': '#1f77b4',\n    'Sul': '#ff7f0e',\n    'Nordeste': '#2ca02c',\n    'Norte': '#d62728',\n    'Centro-Oeste': '#9467bd'\n  };\n  return colors[subsystem] || '#666666';\n}\n\n// Gerar sugestões contextuais\nfunction generateSuggestions(intent, entities) {\n  const suggestions = {\n    'carga_energia': [\n      'Comparar com período anterior',\n      'Ver previsão para próximas horas',\n      'Analisar pico de consumo',\n      entities.regions.length === 0 ? 'Comparar entre regiões' : `Detalhar ${entities.regions[0]}`\n    ],\n    'cmo_pld': [\n      'Comparar patamares de carga',\n      'Ver histórico semanal',\n      'Analisar tendência de preços',\n      'Comparar com mesmo período ano anterior'\n    ],\n    'bandeiras': [\n      'Ver impacto na conta de luz',\n      'Histórico do último ano',\n      'Previsão para próximo mês',\n      'Comparar com inflação'\n    ],\n    'default': [\n      'Ver dados mais recentes',\n      'Comparar períodos',\n      'Exportar relatório',\n      'Fazer análise detalhada'\n    ]\n  };\n  \n  return suggestions[intent] || suggestions.default;\n}\n\n// Calcular métricas de processamento\nconst processingTime = Date.now() - new Date(startTime).getTime();\n\n// Estruturar resposta\nconst structuredResponse = {\n  session_id: metadata.session_id,\n  user_id: metadata.user_id,\n  request_id: metadata.request_id,\n  response: {\n    text: responseContent,\n    intent: metadata.intent,\n    confidence: $('analyze-intent').first().json.analysis.confidence,\n    data_summary: metadata.statistics,\n    raw_data: queryData && queryData.length > 0 ? queryData.flat().slice(0, 100) : null,\n    visualization: needsVisualization ? \n      (functionCall?.arguments || prepareVisualizationData(metadata.intent, queryData)) : \n      null,\n    suggestions: generateSuggestions(\n      metadata.intent,\n      $('analyze-intent').first().json.analysis.entities\n    ),\n    metadata: {\n      processing_time_ms: processingTime,\n      tokens_used: aiResponse.usage?.total_tokens || 0,\n      model: aiResponse.model,\n      data_freshness: metadata.data_age,\n      function_called: functionCall?.name || null\n    }\n  },\n  success: true\n};\n\nreturn {json: structuredResponse};"
+      },
+      "id": "process-response",
+      "name": "Processar Resposta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2650, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "chat_history",
+        "columns": "session_id,user_id,role,content,metadata,created_at",
+        "additionalFields": {},
+        "options": {}
+      },
+      "id": "save-user-message",
+      "name": "Salvar Mensagem User",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2850, 200],
+      "credentials": {
+        "postgres": {
+          "id": "{{credentials.postgres}}",
+          "name": "AIDE PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "chat_history",
+        "columns": "session_id,user_id,role,content,metadata,created_at",
+        "additionalFields": {},
+        "options": {}
+      },
+      "id": "save-ai-response",
+      "name": "Salvar Resposta IA",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2850, 400],
+      "credentials": {
+        "postgres": {
+          "id": "{{credentials.postgres}}",
+          "name": "AIDE PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "=session:{{$json.session_id}}",
+        "value": "={{JSON.stringify($json)}}",
+        "keyType": "automatic",
+        "expire": true,
+        "ttl": 7200,
+        "options": {}
+      },
+      "id": "update-session-cache",
+      "name": "Atualizar Cache Sessão",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [3050, 300],
+      "credentials": {
+        "redis": {
+          "id": "{{credentials.redis}}",
+          "name": "AIDE Redis"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/monitoring/metrics",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify({workflow_name: 'chat_processing', metrics: $json.response.metadata})}}",
+        "options": {}
+      },
+      "id": "send-metrics",
+      "name": "Enviar Métricas",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3250, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "response-webhook",
+      "name": "Responder Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [3450, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const userMessage = $json.message;\nconst analysis = $json.analysis;\nlet simpleResponse = {};\n\nif (analysis.is_greeting) {\n  simpleResponse = {\n    text: 'Olá! Sou o AIDE, seu assistente para dados do setor elétrico. Como posso ajudá-lo hoje?',\n    suggestions: [\n      'Qual a carga atual do sistema?',\n      'Como está o CMO hoje?',\n      'Status das bandeiras tarifárias',\n      'Comparar consumo entre regiões'\n    ]\n  };\n} else if (analysis.is_help) {\n  simpleResponse = {\n    text: `Posso ajudá-lo com:\\n\n📊 **Análise de Carga de Energia**: Consumo por região, picos, médias\\n💰 **CMO/PLD**: Preços, patamares, tendências\\n🚦 **Bandeiras Tarifárias**: Status atual, histórico, impactos\\n⚡ **Geração**: Fontes de energia, produção\\n💧 **Reservatórios**: Níveis, armazenamento\\n🔄 **Intercâmbio**: Transferências entre regiões\\n\nFaça sua pergunta!`,\n    suggestions: [\n      'Carga de energia do Sudeste',\n      'CMO médio desta semana',\n      'Bandeira tarifária atual',\n      'Comparar geração solar e eólica'\n    ]\n  };\n} else if (analysis.is_farewell) {\n  simpleResponse = {\n    text: 'Foi um prazer ajudá-lo! Volte sempre que precisar de informações sobre o setor elétrico.',\n    suggestions: []\n  };\n} else {\n  simpleResponse = {\n    text: 'Entendi sua pergunta. Vou buscar essas informações para você...',\n    suggestions: [\n      'Ver dados mais detalhados',\n      'Comparar com outro período',\n      'Gerar relatório'\n    ]\n  };\n}\n\nreturn {json: {\n  session_id: $json.session_id,\n  user_id: $json.user_id,\n  request_id: $json.request_id,\n  response: {\n    text: simpleResponse.text,\n    intent: analysis.primary_intent,\n    confidence: analysis.confidence,\n    data: null,\n    visualization: null,\n    suggestions: simpleResponse.suggestions,\n    metadata: {\n      processing_time_ms: Date.now() - new Date($json.timestamp).getTime(),\n      type: 'simple_response'\n    }\n  },\n  success: true\n}};"
+      },
+      "id": "simple-response",
+      "name": "Resposta Simples",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 400]
+    }
+  ],
+  "connections": {
+    "webhook-trigger": {
+      "main": [[{"node": "validate-input", "type": "main", "index": 0}]]
+    },
+    "validate-input": {
+      "main": [
+        [
+          {"node": "get-session-cache", "type": "main", "index": 0},
+          {"node": "get-chat-history", "type": "main", "index": 0},
+          {"node": "analyze-intent", "type": "main", "index": 0}
+        ]
+      ]
+    },
+    "analyze-intent": {
+      "main": [[{"node": "needs-data-check", "type": "main", "index": 0}]]
+    },
+    "needs-data-check": {
+      "main": [
+        [
+          {"node": "get-query-template", "type": "main", "index": 0},
+          {"node": "build-query", "type": "main", "index": 0}
+        ],
+        [{"node": "simple-response", "type": "main", "index": 0}]
+      ]
+    },
+    "build-query": {
+      "main": [[{"node": "check-data-freshness", "type": "main", "index": 0}]]
+    },
+    "check-data-freshness": {
+      "main": [
+        [{"node": "check-data-age", "type": "main", "index": 0}],
+        [{"node": "execute-query", "type": "main", "index": 0}]
+      ]
+    },
+    "check-data-age": {
+      "main": [[{"node": "data-too-old", "type": "main", "index": 0}]]
+    },
+    "data-too-old": {
+      "main": [
+        [{"node": "trigger-ingestion", "type": "main", "index": 0}],
+        [{"node": "execute-query", "type": "main", "index": 0}]
+      ]
+    },
+    "trigger-ingestion": {
+      "main": [[{"node": "execute-query", "type": "main", "index": 0}]]
+    },
+    "get-query-template": {
+      "main": [[{"node": "build-query", "type": "main", "index": 0}]]
+    },
+    "execute-query": {
+      "main": [[{"node": "prepare-ai-context", "type": "main", "index": 0}]]
+    },
+    "get-session-cache": {
+      "main": [[{"node": "prepare-ai-context", "type": "main", "index": 0}]]
+    },
+    "get-chat-history": {
+      "main": [[{"node": "prepare-ai-context", "type": "main", "index": 0}]]
+    },
+    "prepare-ai-context": {
+      "main": [[{"node": "openai-completion", "type": "main", "index": 0}]]
+    },
+    "openai-completion": {
+      "main": [[{"node": "process-response", "type": "main", "index": 0}]]
+    },
+    "process-response": {
+      "main": [
+        [
+          {"node": "save-user-message", "type": "main", "index": 0},
+          {"node": "save-ai-response", "type": "main", "index": 0},
+          {"node": "update-session-cache", "type": "main", "index": 0}
+        ]
+      ]
+    },
+    "update-session-cache": {
+      "main": [[{"node": "send-metrics", "type": "main", "index": 0}]]
+    },
+    "send-metrics": {
+      "main": [[{"node": "response-webhook", "type": "main", "index": 0}]]
+    },
+    "simple-response": {
+      "main": [[{"node": "response-webhook", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2024-01-15T10:00:00.000Z",
+  "versionId": "1.0.0"
+}

@@ -694,8 +694,5 @@ def schedule_export(frequency: str, config: Dict) -> bool:
         return True
     return False
 
-# Alias para compatibilidade com main.py
-ExportHandler = ExportManager
-
 # Exportar classes e funções
-__all__ = ['ExportManager', 'ExportHandler', 'render_export_interface', 'schedule_export']
+__all__ = ['ExportManager', 'render_export_interface', 'schedule_export']

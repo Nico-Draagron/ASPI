@@ -1,0 +1,101 @@
+# ASPI - .gitignore
+# Arquivo para excluir dados pesados do GitHub
+
+# ======================
+# 🚫 AMBIENTES VIRTUAIS
+# ======================
+venv/
+env/
+.venv/
+.env/
+
+# ======================
+# 🚫 CACHES E TEMPORÁRIOS
+# ======================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.mypy_cache/
+.pytest_cache/
+.coverage
+.tox/
+
+# ======================
+# 🚫 DADOS PESADOS (ONS)
+# ======================
+data/dados_ons/
+data/dados_tarifas_aneel/
+*.csv
+*.xlsx
+*.xls
+
+# ======================
+# 🚫 LOGS E CACHE
+# ======================
+logs/
+*.log
+cache/
+.cache/
+
+# ======================
+# 🚫 MODELOS TREINADOS
+# ======================
+models/*.pkl
+models/*.joblib
+*.model
+
+# ======================
+# 🚫 SISTEMA OPERACIONAL
+# ======================
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+
+# ======================
+# 🚫 IDEs
+# ======================
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# ======================
+# 🚫 DOCKER
+# ======================
+.docker/
+
+# ======================
+# 🚫 BANCO DE DADOS
+# ======================
+*.db
+*.sqlite
+*.sqlite3
+
+# ======================
+# 🚫 ARQUIVOS PESADOS
+# ======================
+*.pdf
+*.zip
+*.tar.gz
+*.rar
+
+# ======================
+# ✅ MANTER NO REPO
+# ======================
+# Mantenha apenas:
+# - Código fonte (app/)
+# - Configurações (requirements.txt, docker-compose.yml)
+# - Documentação (README, docs/)
+# - Scripts essenciais
+# - Dados exemplo pequenos (< 1MB)
+
+# ======================
+# 🔧 DADOS DE EXEMPLO
+# ======================
+# Se quiser manter dados pequenos para demo:
+!data/sample_data.csv
+!data/exemplo_ons.csv

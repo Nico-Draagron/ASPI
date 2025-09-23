@@ -73,14 +73,16 @@ class Dataset(Base, TimestampMixin, SoftDeleteMixin):
     """Datasets disponíveis no sistema"""
     __tablename__ = 'datasets'
     
-    # ...
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True, index=True)
+    display_name: Mapped[str | None] = mapped_column(String(300))
     description: Mapped[str | None] = mapped_column(Text)
     # Fonte e tipo
     source_type: Mapped[DataSourceType] = mapped_column(SQLEnum(DataSourceType), nullable=False, default=DataSourceType.ONS)
     source_url: Mapped[str | None] = mapped_column(String(500))
     api_endpoint: Mapped[str | None] = mapped_column(String(500))
     # Metadados
-    metadata: Mapped[dict] = mapped_column(JSONB, default={})
+    meta_data: Mapped[dict] = mapped_column(JSONB, default={})
     fields_schema: Mapped[dict] = mapped_column(JSONB, default={})
     tags: Mapped[list[str]] = mapped_column(ARRAY(String), default=[])
     category: Mapped[str | None] = mapped_column(String(100), index=True)
@@ -139,7 +141,7 @@ class DataRecord(Base, TimestampMixin):
     # Dados estruturados
     raw_data: Mapped[dict] = mapped_column(JSONB, default={})
     processed_data: Mapped[dict] = mapped_column(JSONB, default={})
-    metadata: Mapped[dict] = mapped_column(JSONB, default={})
+    meta_data: Mapped[dict] = mapped_column(JSONB, default={})
 
     # Qualidade
     quality_flag: Mapped[str | None] = mapped_column(String(20))  # verified, estimated, error
@@ -154,7 +156,7 @@ class DataRecord(Base, TimestampMixin):
         Index('idx_data_record_temporal', 'dataset_id', 'timestamp', 'region'),
         Index('idx_data_record_metric', 'metric_type', 'timestamp'),
         Index('idx_data_record_year_month', 'year', 'month'),
-        Index('idx_data_record_metadata', 'metadata', postgresql_using='gin'),
+        Index('idx_data_record_meta_data', 'meta_data', postgresql_using='gin'),
         UniqueConstraint('dataset_id', 'timestamp', 'region', 'metric_type', 
                         name='uq_data_record_unique'),
     )
@@ -183,7 +185,7 @@ class CargaEnergia(Base, TimestampMixin):
     min_daily: Mapped[float | None] = mapped_column(Float)
     avg_daily: Mapped[float | None] = mapped_column(Float)
     std_dev: Mapped[float | None] = mapped_column(Float)
-    metadata: Mapped[dict] = mapped_column(JSONB, default={})
+    meta_data: Mapped[dict] = mapped_column(JSONB, default={})
     
     __table_args__ = (
         Index('idx_carga_energia_subsistema_data', 'id_subsistema', 'din_instante'),
@@ -214,7 +216,7 @@ class CMO(Base, TimestampMixin):
     val_cmomediasemanal: Mapped[float | None] = mapped_column(DECIMAL(10, 2))
     val_cmo: Mapped[float | None] = mapped_column(DECIMAL(10, 2))
     patamar: Mapped[str | None] = mapped_column(String(20))
-    metadata: Mapped[dict] = mapped_column(JSONB, default={})
+    meta_data: Mapped[dict] = mapped_column(JSONB, default={})
     
     __table_args__ = (
         Index('idx_cmo_subsistema_data', 'id_subsistema', 'din_instante'),
@@ -240,7 +242,7 @@ class BandeiraTarifariaAcionamento(Base, TimestampMixin):
     vlr_adicional_bandeira: Mapped[float] = mapped_column(DECIMAL(10, 2), nullable=False)
     vlr_adicional_kwh: Mapped[float | None] = mapped_column(DECIMAL(10, 4))
     motivo_acionamento: Mapped[str | None] = mapped_column(Text)
-    metadata: Mapped[dict] = mapped_column(JSONB, default={})
+    meta_data: Mapped[dict] = mapped_column(JSONB, default={})
     
     __table_args__ = (
         UniqueConstraint('dat_competencia', name='uq_bandeira_competencia'),
@@ -278,7 +280,7 @@ class Reservatorio(Base, TimestampMixin):
     energia_armazenada_percentual: Mapped[float | None] = mapped_column(DECIMAL(5, 2))  # %
     
     # Metadados
-    metadata: Mapped[dict] = mapped_column(JSONB, default={})
+    meta_data: Mapped[dict] = mapped_column(JSONB, default={})
     
     __table_args__ = (
         Index('idx_reservatorio_data', 'codigo_reservatorio', 'data_medicao'),
@@ -313,7 +315,7 @@ class GeracaoUsina(Base, TimestampMixin):
     disponibilidade: Mapped[float | None] = mapped_column(DECIMAL(5, 2))  # %
 
     # Metadados
-    metadata: Mapped[dict] = mapped_column(JSONB, default={})
+    meta_data: Mapped[dict] = mapped_column(JSONB, default={})
     
     __table_args__ = (
         Index('idx_geracao_usina_temporal', 'codigo_usina', 'data_hora'),
@@ -345,7 +347,7 @@ class IntercambioRegional(Base, TimestampMixin):
 
     # Metadados
     restricoes: Mapped[dict] = mapped_column(JSONB, default={})
-    metadata: Mapped[dict] = mapped_column(JSONB, default={})
+    meta_data: Mapped[dict] = mapped_column(JSONB, default={})
 
     __table_args__ = (
         Index('idx_intercambio_subsistemas', 'subsistema_origem', 
@@ -379,7 +381,7 @@ class ChatHistory(Base, TimestampMixin, SoftDeleteMixin):
     model_used = Column(String(50))
     
     # Metadados
-    metadata = Column(JSONB, default={})
+    meta_data = Column(JSONB, default={})
     
     __table_args__ = (
         Index('idx_chat_history_session', 'session_id', 'created_at'),

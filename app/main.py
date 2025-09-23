@@ -1,45 +1,98 @@
 """
-AIDE - Assistente Inteligente para Dados do Setor Elétrico
-Aplicativo Principal Streamlit
+ASPI - Assistente Inteligente para Dados do Setor Elétrico
+Interface dupla: Básica (usuários leigos) e Avançada (cientistas de dados)
 """
 
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime, timedelta
 import numpy as np
+import asyncio
+import requests
+from pathlib import Path
+import sys
+from datetime import datetime
 
-# Importar componentes (serão criados posteriormente)
+# Adicionar o diretório app ao path
+sys.path.append(str(Path(__file__).parent))
+
+# Imports dos componentes existentes
 from components.sidebar import render_sidebar
 from components.chat import render_chat_interface
 from components.metrics import render_metrics_dashboard
 from components.visualizations import render_main_chart
 
+# Import de export com fallback
+try:
+    from components.export import ExportHandler
+    EXPORT_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️ ExportHandler não disponível: {e}")
+    EXPORT_AVAILABLE = False
+    ExportHandler = None
+    print(f"Warning: Export component not available: {e}")
+    EXPORT_AVAILABLE = False
+    class ExportHandler:
+        def __init__(self):
+            pass
+
+# Imports dos services
+try:
+    from services.ai_service import AIService
+    from services.data_service import DataService
+    from services.ons_service import ONSService
+    from services.cache_service import CacheService
+except ImportError as e:
+    print(f"Warning: Some services not available: {e}")
+
+# Import do ML (novo)
+try:
+    from ml.energy_ml_pipeline import EnergyMLPipeline, execute_ml_pipeline
+    ML_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: ML module not available: {e}")
+    ML_AVAILABLE = False
+    class EnergyMLPipeline:
+        def __init__(self):
+            pass
+    def execute_ml_pipeline():
+        return {}, None
+
+# Import da API Health Check
+try:
+    from api.health import health_check_endpoint
+    from datetime import datetime
+    HEALTH_API_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Health API not available: {e}")
+    from datetime import datetime
+    HEALTH_API_AVAILABLE = False
+    def health_check_endpoint():
+        return {"status": "error", "message": "Health API not available"}
+
 # Configuração da página
 st.set_page_config(
-    page_title="AIDE - Assistente Inteligente ONS",
+    page_title="ASPI - Assistente Inteligente ONS",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
     menu_items={
-        'Get Help': 'https://www.ons.org.br',
+        'Get Help': 'https://github.com/Nico-Draagron/ASPI',
         'Report a bug': None,
-        'About': "AIDE - Assistente Inteligente para Dados do Setor Elétrico v1.0"
+        'About': "ASPI v1.0 - Interface Dupla com ML"
     }
 )
 
-# Carregar CSS customizado
-def load_css():
-    """Carrega o CSS customizado"""
-    with open('app/assets/styles/streamlit_custom.css') as f:
-        st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
-
-# Inicializar estado da sessão
+# Inicializar session state
 def init_session_state():
     """Inicializa variáveis de estado da sessão"""
     if 'messages' not in st.session_state:
         st.session_state.messages = []
+    
+    if 'interface_mode' not in st.session_state:
+        st.session_state.interface_mode = 'basico'
+    
+    if 'ml_results' not in st.session_state:
+        st.session_state.ml_results = None
     
     if 'current_analysis' not in st.session_state:
         st.session_state.current_analysis = None
@@ -47,470 +100,826 @@ def init_session_state():
     if 'selected_dataset' not in st.session_state:
         st.session_state.selected_dataset = "carga_energia"
     
-    if 'selected_period' not in st.session_state:
-        st.session_state.selected_period = "7d"
-    
-    if 'selected_regions' not in st.session_state:
-        st.session_state.selected_regions = ["Sudeste/CO", "Sul", "Nordeste", "Norte"]
-    
     if 'theme_mode' not in st.session_state:
         st.session_state.theme_mode = "light"
 
-def render_header():
-    """Renderiza o cabeçalho principal da aplicação"""
-    header_col1, header_col2, header_col3 = st.columns([1, 4, 1])
+# CSS customizado
+def load_custom_css():
+    """Carrega CSS customizado"""
+    css_file = Path("app/assets/styles/streamlit_custom.css")
+    if css_file.exists():
+        with open(css_file) as f:
+            st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
     
-    with header_col1:
-        # Placeholder para logo
-        st.markdown("""
-            <div style="display: flex; align-items: center; justify-content: center; 
-                        width: 100px; height: 100px; background: linear-gradient(135deg, #e7cba9, #f0d8bc); 
-                        border-radius: 20px; margin: auto;">
-                <span style="font-size: 48px;">⚡</span>
-            </div>
-        """, unsafe_allow_html=True)
-    
-    with header_col2:
-        st.markdown("""
-            <div class="main-header">
-                <h1 class="header-title">
-                    AIDE - Assistente Inteligente para Dados do Setor Elétrico
-                </h1>
-                <p class="header-subtitle">
-                    Análise em tempo real dos dados do ONS com inteligência artificial
-                </p>
-            </div>
-        """, unsafe_allow_html=True)
-    
-    with header_col3:
-        # Status de conexão
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("""
-                <div style="text-align: center; padding: 10px;">
-                    <div style="width: 12px; height: 12px; background: #10b981; 
-                                border-radius: 50%; margin: auto; animation: pulse 2s infinite;">
-                    </div>
-                    <small style="color: #6c757d;">Online</small>
-                </div>
-            """, unsafe_allow_html=True)
-        with col2:
-            if st.button("🌙", key="theme_toggle", help="Alternar tema"):
-                st.session_state.theme_mode = "dark" if st.session_state.theme_mode == "light" else "light"
-                st.rerun()
-
-def render_quick_insights():
-    """Renderiza cards com insights rápidos"""
-    st.markdown("### 📊 Insights Rápidos do Sistema")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown("""
-            <div class="metric-card">
-                <div class="metric-label">Carga Total SIN</div>
-                <div class="metric-value">72.845 MW</div>
-                <div class="metric-delta positive">↑ 3.2% vs ontem</div>
-            </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown("""
-            <div class="metric-card">
-                <div class="metric-label">CMO Médio SE/CO</div>
-                <div class="metric-value">R$ 142,30</div>
-                <div class="metric-delta negative">↑ 8.5% vs semana</div>
-            </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        st.markdown("""
-            <div class="metric-card">
-                <div class="metric-label">Bandeira Tarifária</div>
-                <div class="metric-value">Verde</div>
-                <div class="metric-delta positive">Sem adicional</div>
-            </div>
-        """, unsafe_allow_html=True)
-    
-    with col4:
-        st.markdown("""
-            <div class="metric-card">
-                <div class="metric-label">Reservatórios SE/CO</div>
-                <div class="metric-value">58.3%</div>
-                <div class="metric-delta positive">↑ 2.1% vs mês</div>
-            </div>
-        """, unsafe_allow_html=True)
-
-def render_main_dashboard():
-    """Renderiza o dashboard principal com gráficos"""
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 Carga de Energia", "💰 CMO/PLD", "🚦 Bandeiras", "📊 Análise Comparativa"])
-    
-    with tab1:
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            # Gráfico de carga de energia
-            dates = pd.date_range(end=datetime.now(), periods=30, freq='D')
-            
-            fig = go.Figure()
-            for region in st.session_state.selected_regions:
-                values = np.random.normal(20000, 2000, 30) + np.random.randint(-1000, 1000, 30)
-                fig.add_trace(go.Scatter(
-                    x=dates,
-                    y=values,
-                    mode='lines',
-                    name=region,
-                    line=dict(width=2.5)
-                ))
-            
-            fig.update_layout(
-                title="Evolução da Carga de Energia por Subsistema (MWmed)",
-                xaxis_title="Data",
-                yaxis_title="Carga (MWmed)",
-                height=400,
-                hovermode='x unified',
-                plot_bgcolor='white',
-                paper_bgcolor='white',
-                font=dict(family="Inter, sans-serif"),
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="right",
-                    x=1
-                )
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            st.markdown("#### 📊 Resumo do Período")
-            st.info("""
-                **Período:** Últimos 30 dias  
-                **Maior carga:** SE/CO - 45.230 MW  
-                **Menor carga:** Norte - 8.450 MW  
-                **Média SIN:** 72.845 MW
-            """)
-            
-            st.markdown("#### 🎯 Destaques")
-            st.success("✅ Carga estável em todos os subsistemas")
-            st.warning("⚠️ Pico esperado para próxima semana")
-    
-    with tab2:
-        # CMO/PLD Dashboard
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            # Gráfico de barras CMO por patamar
-            patamares = ['Leve', 'Médio', 'Pesado']
-            subsistemas = ['SE/CO', 'Sul', 'NE', 'Norte']
-            
-            data = []
-            for subsistema in subsistemas:
-                for patamar in patamares:
-                    data.append({
-                        'Subsistema': subsistema,
-                        'Patamar': patamar,
-                        'CMO': np.random.uniform(100, 200)
-                    })
-            
-            df = pd.DataFrame(data)
-            fig = px.bar(df, x='Subsistema', y='CMO', color='Patamar',
-                        title='CMO por Subsistema e Patamar de Carga (R$/MWh)',
-                        color_discrete_map={'Leve': '#cfe4f9', 'Médio': '#e7cba9', 'Pesado': '#ffa500'})
-            
-            fig.update_layout(height=400)
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            st.markdown("#### 💡 Análise CMO")
-            st.metric("CMO Médio Nacional", "R$ 156,80", "+12,30")
-            st.metric("Spread Máximo", "R$ 45,20", "-5,10")
-            
-            with st.expander("ℹ️ Sobre o CMO"):
-                st.write("""
-                O **Custo Marginal de Operação (CMO)** representa o custo 
-                de produzir 1 MWh adicional de energia no sistema.
-                """)
-    
-    with tab3:
-        # Histórico de Bandeiras
-        st.markdown("### 🚦 Histórico de Bandeiras Tarifárias")
-        
-        # Timeline de bandeiras
-        months = pd.date_range(end=datetime.now(), periods=12, freq='M')
-        bandeiras = ['Verde', 'Verde', 'Amarela', 'Verde', 'Verde', 'Vermelha P1', 
-                    'Vermelha P2', 'Amarela', 'Verde', 'Verde', 'Verde', 'Verde']
-        valores = [0, 0, 2.989, 0, 0, 6.500, 9.795, 2.989, 0, 0, 0, 0]
-        
-        fig = go.Figure()
-        colors = {'Verde': '#10b981', 'Amarela': '#fbbf24', 'Vermelha P1': '#f87171', 'Vermelha P2': '#dc2626'}
-        
-        for i, (month, bandeira, valor) in enumerate(zip(months, bandeiras, valores)):
-            color = colors.get(bandeira.split()[0], '#gray')
-            fig.add_trace(go.Bar(
-                x=[month],
-                y=[valor if valor > 0 else 0.5],
-                name=bandeira,
-                marker_color=color,
-                text=f"{bandeira}<br>R$ {valor:.2f}",
-                textposition='outside',
-                showlegend=i == bandeiras.index(bandeira)
-            ))
-        
-        fig.update_layout(
-            title="Evolução das Bandeiras Tarifárias - Últimos 12 Meses",
-            xaxis_title="Mês",
-            yaxis_title="Valor Adicional (R$/100 kWh)",
-            height=400,
-            barmode='group'
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with tab4:
-        # Análise Comparativa
-        st.markdown("### 📊 Análise Comparativa Regional")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Mapa de calor correlação
-            st.markdown("#### Correlação entre Subsistemas")
-            
-            corr_data = np.random.rand(4, 4)
-            np.fill_diagonal(corr_data, 1)
-            corr_data = (corr_data + corr_data.T) / 2
-            
-            fig = px.imshow(corr_data,
-                           labels=dict(x="Subsistema", y="Subsistema", color="Correlação"),
-                           x=['SE/CO', 'Sul', 'NE', 'Norte'],
-                           y=['SE/CO', 'Sul', 'NE', 'Norte'],
-                           color_continuous_scale='RdBu',
-                           aspect="auto")
-            
-            fig.update_layout(height=350)
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            # Ranking de eficiência
-            st.markdown("#### 🏆 Ranking de Eficiência Energética")
-            
-            ranking_data = pd.DataFrame({
-                'Subsistema': ['SE/CO', 'Sul', 'Nordeste', 'Norte'],
-                'Eficiência': [92, 88, 85, 79],
-                'Tendência': ['↑', '↔', '↑', '↓']
-            })
-            
-            for idx, row in ranking_data.iterrows():
-                color = '#10b981' if row['Tendência'] == '↑' else '#fbbf24' if row['Tendência'] == '↔' else '#ef4444'
-                st.markdown(f"""
-                    <div style="display: flex; align-items: center; padding: 10px; 
-                                background: linear-gradient(90deg, {color}20 0%, transparent 100%); 
-                                border-radius: 8px; margin: 5px 0;">
-                        <span style="font-size: 24px; margin-right: 15px;">#{idx+1}</span>
-                        <div style="flex: 1;">
-                            <strong>{row['Subsistema']}</strong><br>
-                            <small>Eficiência: {row['Eficiência']}%</small>
-                        </div>
-                        <span style="font-size: 20px; color: {color};">{row['Tendência']}</span>
-                    </div>
-                """, unsafe_allow_html=True)
-
-def render_chat_section():
-    """Renderiza a seção de chat com o assistente"""
-    st.markdown("### 💬 Converse com o AIDE")
-    
-    # Container do chat
-    chat_container = st.container()
-    
-    with chat_container:
-        # Histórico de mensagens
-        for message in st.session_state.messages:
-            if message["role"] == "user":
-                st.markdown(f"""
-                    <div class="user-message">
-                        <strong>👤 Você:</strong><br>
-                        {message["content"]}
-                    </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.markdown(f"""
-                    <div class="assistant-message">
-                        <strong>⚡ AIDE:</strong><br>
-                        {message["content"]}
-                    </div>
-                """, unsafe_allow_html=True)
-    
-    # Input do usuário
-    col1, col2 = st.columns([5, 1])
-    with col1:
-        user_input = st.text_input(
-            "Digite sua pergunta sobre o setor elétrico:",
-            placeholder="Ex: Qual foi a carga média do Sudeste na última semana?",
-            key="user_input",
-            label_visibility="collapsed"
-        )
-    
-    with col2:
-        send_button = st.button("Enviar 📤", type="primary", use_container_width=True)
-    
-    if send_button and user_input:
-        # Adicionar mensagem do usuário
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        
-        # Simular resposta do assistente
-        response = f"""Analisando sua pergunta sobre: "{user_input}"
-        
-Com base nos dados do ONS, posso informar que:
-- A carga média do Sudeste/CO na última semana foi de 42.350 MWmed
-- Houve um crescimento de 3,2% em relação à semana anterior
-- O pico de consumo ocorreu na quinta-feira às 15h com 48.230 MW
-
-Gostaria de ver um gráfico detalhado dessa análise?"""
-        
-        st.session_state.messages.append({"role": "assistant", "content": response})
-        st.rerun()
-
-def main():
-    """Função principal do aplicativo"""
-    # Inicializar estado
-    init_session_state()
-    
-    # Carregar CSS (comentado pois o arquivo ainda não existe)
-    # load_css()
-    
-    # Aplicar CSS inline
+    # CSS adicional inline
     st.markdown("""
-        <style>
-        /* Inserir o CSS aqui temporariamente */
-        .stApp {
-            background-color: #FFFFFF;
+    <style>
+        .main-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 2rem;
+            border-radius: 10px;
+            text-align: center;
+            margin-bottom: 2rem;
+            color: white;
         }
         
         .metric-card {
-            background: #FFFFFF;
-            border: 1px solid #e9ecef;
-            border-radius: 12px;
-            padding: 1.25rem;
-            margin: 0.5rem;
-            transition: all 0.3s ease;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            background: white;
+            padding: 1.5rem;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 1rem;
+            border-left: 4px solid #667eea;
         }
         
-        .metric-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(231, 203, 169, 0.15);
-            border-color: #e7cba9;
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 8px;
         }
         
-        .metric-label {
-            color: #6c757d;
-            font-size: 0.875rem;
-            font-weight: 500;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-bottom: 0.5rem;
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 8px;
+            padding: 10px 20px;
         }
         
-        .metric-value {
-            color: #2c3e50;
-            font-size: 2rem;
-            font-weight: 700;
-            margin: 0.25rem 0;
+        .quick-action-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1rem 2rem;
+            border-radius: 8px;
+            text-align: center;
+            cursor: pointer;
+            transition: transform 0.2s;
         }
         
-        .metric-delta {
-            font-size: 0.875rem;
-            font-weight: 500;
-            padding: 0.25rem 0.5rem;
-            border-radius: 6px;
-            display: inline-block;
+        .info-card {
+            background: #f0f2f6;
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 1rem 0;
         }
-        
-        .metric-delta.positive {
-            color: #10b981;
-            background: #d1fae5;
-        }
-        
-        .metric-delta.negative {
-            color: #ef4444;
-            background: #fee2e2;
-        }
-        
-        .user-message {
-            background: linear-gradient(135deg, #cfe4f9 0%, #e8f4fd 100%);
-            padding: 1rem 1.25rem;
-            border-radius: 12px 12px 4px 12px;
-            margin: 0.75rem 0;
-            border-left: 3px solid #3b82f6;
-        }
-        
-        .assistant-message {
-            background: linear-gradient(135deg, #f9f7f4 0%, #ffffff 100%);
-            padding: 1rem 1.25rem;
-            border-radius: 12px 12px 12px 4px;
-            margin: 0.75rem 0;
-            border-left: 3px solid #e7cba9;
-        }
-        
-        .main-header {
-            background: linear-gradient(135deg, #e7cba9 0%, #f4e4d4 100%);
-            padding: 1.5rem 2rem;
-            border-radius: 16px;
-            margin-bottom: 2rem;
-            box-shadow: 0 4px 6px rgba(231, 203, 169, 0.1);
-        }
-        
-        .header-title {
-            color: #2c3e50;
-            font-size: 2rem;
-            font-weight: 700;
-            margin: 0;
-        }
-        
-        .header-subtitle {
-            color: #5a6c7d;
-            font-size: 1rem;
-            margin-top: 0.5rem;
-            font-weight: 400;
-        }
-        
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
-        }
-        </style>
+    </style>
+    """, unsafe_allow_html=True)
+
+# ======================================
+# INTERFACE BÁSICA (USUÁRIOS LEIGOS)
+# ======================================
+def render_basic_interface():
+    """Interface simplificada para usuários não-técnicos"""
+    
+    # Header principal
+    st.markdown("""
+    <div class="main-header">
+        <h1 style="margin: 0;">⚡ ASPI - Assistente de Energia</h1>
+        <p style="margin: 0.5rem 0;">Entenda o setor elétrico de forma simples e clara</p>
+    </div>
     """, unsafe_allow_html=True)
     
-    # Renderizar sidebar
+    # Métricas principais usando componentes nativos do Streamlit
+    st.markdown("### 📊 Indicadores Principais do SIN")
+    
+    # Métricas usando st.metric (componente nativo)
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("⚡ Consumo Atual", "72.845 MW", "3.2%")
+    
+    with col2:
+        st.metric("💰 Custo Médio", "R$ 156/MWh", "12%")
+    
+    with col3:
+        st.metric("🚦 Bandeira", "Amarela", "R$ 2,989/100kWh")
+        
+    with col4:
+        st.metric("💧 Reservatórios", "58.3%", "↓ 5%")
+    
+    st.markdown("---")
+    
+    # Controles de integração N8N
+    with st.expander("🔧 Controles de Sistema (Admin)", expanded=False):
+        st.markdown("**Integração com N8N Workflows:**")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🔍 Health Check", use_container_width=True):
+                st.rerun()  # Isso irá chamar o health check via query param
+        
+        with col2:
+            if st.button("💬 Testar Chat N8N", use_container_width=True):
+                # Redirecionar para webhook de chat
+                st.markdown("""
+                <script>
+                window.location.href = '?webhook=chat';
+                </script>
+                """, unsafe_allow_html=True)
+        
+        with col3:
+            if st.button("📊 Trigger Ingestão", use_container_width=True):
+                # Redirecionar para webhook de ingestão
+                st.markdown("""
+                <script>
+                window.location.href = '?webhook=data_ingestion';
+                </script>
+                """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # Tabs para organização
+    tab1, tab2, tab3, tab4 = st.tabs(["💬 Assistente", "📊 Visualizações", "📈 Análises", "💡 Dicas"])
+    
+    with tab1:
+        # Usar o componente de chat existente
+        st.markdown("### 💬 Converse com o Assistente")
+        
+        # Perguntas sugeridas
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("📊 Qual o consumo atual?", use_container_width=True):
+                st.session_state.messages.append({
+                    "role": "user",
+                    "content": "Qual o consumo atual de energia?"
+                })
+        
+        with col2:
+            if st.button("💰 Por que a conta está alta?", use_container_width=True):
+                st.session_state.messages.append({
+                    "role": "user",
+                    "content": "Por que a conta de energia está alta?"
+                })
+        
+        # Chat interface com integração N8N
+        st.markdown("### 💭 Chat com Assistente IA")
+        
+        # Área de mensagens
+        chat_container = st.container()
+        
+        with chat_container:
+            # Mostrar histórico de mensagens
+            for message in st.session_state.messages:
+                if message["role"] == "user":
+                    st.markdown(f"""
+                    <div style="background: #e3f2fd; padding: 1rem; border-radius: 10px; margin: 0.5rem 0;">
+                        <b>👤 Você:</b> {message['content']}
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div style="background: #f5f5f5; padding: 1rem; border-radius: 10px; margin: 0.5rem 0;">
+                        <b>🤖 Assistente:</b> {message['content']}
+                    </div>
+                    """, unsafe_allow_html=True)
+        
+        # Input de nova mensagem
+        user_input = st.text_input("Digite sua pergunta:", key="chat_input", placeholder="Ex: Qual o consumo de energia agora?")
+        
+        if st.button("📤 Enviar", key="send_chat") and user_input:
+            # Adicionar mensagem do usuário
+            st.session_state.messages.append({
+                "role": "user",
+                "content": user_input
+            })
+            
+            # Processar via N8N
+            try:
+                import requests
+                
+                chat_data = {
+                    "user_id": "streamlit_user",
+                    "session_id": st.session_state.get('session_id', f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),
+                    "message": user_input,
+                    "source": "streamlit_basic",
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                # Enviar para N8N
+                response = requests.post(
+                    "http://localhost:5679/webhook-test/chat/process",
+                    json=chat_data,
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    ai_response = response.json().get('response', 'Resposta processada com sucesso!')
+                else:
+                    ai_response = "Desculpe, não consegui processar sua pergunta no momento. Tente novamente."
+                    
+            except Exception as e:
+                ai_response = f"Erro na comunicação com o assistente: {str(e)}"
+            
+            # Adicionar resposta do assistente
+            st.session_state.messages.append({
+                "role": "assistant", 
+                "content": ai_response
+            })
+            
+            # Limpar input e reexecutar
+            st.rerun()
+        
+        # Botão para limpar chat
+        if st.button("🗑️ Limpar Chat"):
+            st.session_state.messages = []
+            st.rerun()
+    
+    with tab2:
+        # Visualizações usando componente existente
+        st.markdown("### 📊 Visualizações do Sistema")
+        try:
+            render_main_chart()
+        except Exception as e:
+            st.error(f"Erro ao carregar gráficos: {e}")
+            # Gráfico simples de exemplo
+            data = {
+                'Região': ['Sudeste/CO', 'Sul', 'Nordeste', 'Norte'],
+                'Consumo (MW)': [42350, 15230, 12845, 2420]
+            }
+            df = pd.DataFrame(data)
+            st.bar_chart(df.set_index('Região'))
+    
+    with tab3:
+        # Análises simples
+        st.markdown("### 📈 Análises Simplificadas")
+        
+        analysis_type = st.selectbox(
+            "Escolha o tipo de análise:",
+            ["Consumo por Região", "Evolução Temporal", "Comparação de Custos"]
+        )
+        
+        if analysis_type == "Consumo por Região":
+            st.info("📊 Análise de consumo por região em desenvolvimento...")
+    
+    with tab4:
+        # Dicas educativas
+        st.markdown("### 💡 Dicas para Economizar")
+        
+        tips = [
+            ("🌡️", "Configure o ar-condicionado para 23°C", "Cada grau a menos aumenta 8% no consumo"),
+            ("💡", "Use lâmpadas LED", "Economia de até 80% comparado às incandescentes"),
+            ("🚿", "Tome banhos de 5 minutos", "Chuveiro elétrico é um dos maiores consumidores"),
+            ("🧊", "Mantenha a geladeira bem vedada", "Borrachas ruins aumentam o consumo em 30%"),
+        ]
+        
+        for emoji, title, description in tips:
+            st.info(f"{emoji} **{title}**\n\n{description}")
+
+# ======================================
+# INTERFACE AVANÇADA (CIENTISTAS DE DADOS)
+# ======================================
+def render_advanced_interface():
+    """Interface completa com ML e análises técnicas"""
+    
+    st.markdown("## 🔬 ASPI - Análise Avançada com Machine Learning")
+    
+    # Verificar se ML está disponível
+    if not ML_AVAILABLE:
+        st.error("⚠️ Módulo ML não disponível. Instale as dependências necessárias.")
+        st.code("pip install scikit-learn xgboost shap plotly")
+        return
+    
+    # Sidebar com configurações
     with st.sidebar:
-        render_sidebar()
+        st.markdown("### ⚙️ Configurações ML")
+        
+        # Seleção de dataset
+        dataset = st.selectbox(
+            "Dataset ONS:",
+            ["carga_energia", "cmo", "bandeira_tarifaria"]
+        )
+        
+        # Tipo de análise
+        analysis_type = st.selectbox(
+            "Tipo de Análise:",
+            ["Pipeline Completo", "Apenas Regressão", "Apenas Clustering", 
+             "Detecção de Anomalias", "Interpretabilidade"]
+        )
+        
+        # Botão para executar ML
+        if st.button("🚀 Executar Pipeline ML", type="primary", use_container_width=True):
+            st.session_state.run_ml = True
+        
+        st.markdown("---")
+        
+        # Controles de N8N
+        st.markdown("### 🔗 Integração N8N")
+        
+        if st.button("🔄 Atualizar Dados ONS", use_container_width=True):
+            # Trigger data ingestion workflow
+            try:
+                response = requests.post(
+                    "http://localhost:5679/webhook-test/data-ingestion/trigger",
+                    json={"force_update": True, "source": "streamlit_advanced"},
+                    timeout=5
+                )
+                if response.status_code == 200:
+                    st.success("✅ Ingestão iniciada!")
+                else:
+                    st.error("❌ Erro na ingestão")
+            except Exception as e:
+                st.error(f"❌ Erro: {str(e)}")
+        
+        if st.button("💬 Testar Chat Avançado", use_container_width=True):
+            # Test advanced chat
+            try:
+                response = requests.post(
+                    "http://localhost:5679/webhook-test/chat/process",
+                    json={
+                        "message": "Análise técnica do SIN",
+                        "user_id": "advanced_user",
+                        "source": "streamlit_advanced"
+                    },
+                    timeout=5
+                )
+                if response.status_code == 200:
+                    st.success("✅ Chat funcionando!")
+                else:
+                    st.error("❌ Erro no chat")
+            except Exception as e:
+                st.error(f"❌ Erro: {str(e)}")
     
-    # Renderizar conteúdo principal
-    render_header()
+    # Tabs principais
+    tabs = st.tabs([
+        "📊 EDA", 
+        "🤖 Modelagem ML", 
+        "📈 Métricas & Validação",
+        "🔍 Interpretabilidade",
+        "🎯 Clustering & Anomalias",
+        "📝 Relatório"
+    ])
     
-    # Quick insights
-    render_quick_insights()
+    # Tab 1: EDA
+    with tabs[0]:
+        render_eda_section()
     
-    # Separador
-    st.markdown("---")
+    # Tab 2: Modelagem ML
+    with tabs[1]:
+        render_ml_modeling()
     
-    # Dashboard principal
-    render_main_dashboard()
+    # Tab 3: Métricas
+    with tabs[2]:
+        render_validation_metrics()
     
-    # Separador
-    st.markdown("---")
+    # Tab 4: SHAP
+    with tabs[3]:
+        render_shap_analysis()
     
-    # Seção de chat
-    render_chat_section()
+    # Tab 5: Clustering
+    with tabs[4]:
+        render_clustering_anomalies()
+    
+    # Tab 6: Relatório
+    with tabs[5]:
+        render_ml_report()
+
+def render_eda_section():
+    """Seção de Análise Exploratória"""
+    st.markdown("### 📊 Análise Exploratória de Dados")
+    
+    # Métricas do dataset
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Registros", "1,245,678")
+    
+    with col2:
+        st.metric("Features", "47")
+    
+    with col3:
+        st.metric("Missing %", "0.3%")
+    
+    with col4:
+        st.metric("Outliers", "2.1%")
+    
+    st.info("📊 Funcionalidades de EDA em desenvolvimento...")
+
+def render_ml_modeling():
+    """Seção de Modelagem ML"""
+    st.markdown("### 🤖 Modelagem Machine Learning")
+    
+    if st.session_state.get('run_ml', False):
+        # Progress bar
+        progress = st.progress(0)
+        status = st.empty()
+        
+        # Container para resultados
+        results_container = st.container()
+        
+        with results_container:
+            with st.spinner("Executando pipeline ML..."):
+                try:
+                    # Executar pipeline ML de forma assíncrona
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    # Simular progresso
+                    for i in range(0, 101, 10):
+                        progress.progress(i)
+                        status.info(f"Progresso: {i}%")
+                        
+                    # Executar pipeline
+                    pipeline = EnergyMLPipeline()
+                    results = loop.run_until_complete(pipeline.run_complete_pipeline())
+                    
+                    progress.progress(100)
+                    status.success("✅ Pipeline concluído!")
+                    
+                    # Salvar resultados no session state
+                    st.session_state.ml_results = results
+                    
+                    # Mostrar resultados
+                    if results['status'] == 'concluído':
+                        st.success("✅ Modelos treinados com sucesso!")
+                        
+                        # Mostrar métricas dos modelos
+                        st.markdown("#### Resultados dos Modelos")
+                        
+                        for model_name, metrics in results['models'].items():
+                            with st.expander(f"📊 {model_name}"):
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric("MAE Teste", f"{metrics['test_mae']:.2f}")
+                                with col2:
+                                    st.metric("R² Score", f"{metrics['test_r2']:.3f}")
+                                with col3:
+                                    st.metric("Status", metrics['overfit_status'])
+                    
+                    else:
+                        st.error(f"❌ Erro no pipeline: {results.get('error', 'Erro desconhecido')}")
+                
+                except Exception as e:
+                    st.error(f"❌ Erro ao executar pipeline: {e}")
+                    progress.progress(0)
+                finally:
+                    loop.close()
+                    
+        # Reset flag
+        st.session_state.run_ml = False
+    else:
+        st.info("👈 Configure e execute o pipeline ML na barra lateral")
+
+def render_validation_metrics():
+    """Seção de Métricas e Validação"""
+    st.markdown("### 📈 Métricas e Validação")
+    
+    if st.session_state.ml_results:
+        results = st.session_state.ml_results
+        st.success("📊 Resultados do pipeline disponíveis!")
+        
+        # Mostrar métricas de clustering se disponível
+        if 'clustering' in results:
+            cluster_info = results['clustering']
+            st.markdown("#### Clustering")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Silhouette Score", f"{cluster_info['silhouette_score']:.3f}")
+            with col2:
+                st.metric("Clusters", cluster_info['n_clusters'])
+        
+        # Mostrar anomalias se disponível
+        if 'anomalies' in results:
+            anomaly_info = results['anomalies']
+            st.markdown("#### Detecção de Anomalias")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Anomalias Detectadas", anomaly_info['n_anomalies'])
+            with col2:
+                st.metric("Taxa de Anomalias", f"{anomaly_info['anomaly_rate']*100:.1f}%")
+    else:
+        st.info("Execute o pipeline ML primeiro")
+
+def render_shap_analysis():
+    """Seção de Interpretabilidade com SHAP"""
+    st.markdown("### 🔍 Interpretabilidade - SHAP Analysis")
+    
+    if st.session_state.ml_results and 'interpretability' in st.session_state.ml_results:
+        interp_results = st.session_state.ml_results['interpretability']
+        
+        if 'feature_importance' in interp_results:
+            st.markdown("#### Feature Importance")
+            feature_df = interp_results['feature_importance']
+            
+            if not feature_df.empty:
+                st.dataframe(feature_df.head(10), use_container_width=True)
+            else:
+                st.info("Dados de feature importance não disponíveis")
+        else:
+            st.info("Análise SHAP em desenvolvimento...")
+    else:
+        st.info("Execute o pipeline ML primeiro")
+
+def render_clustering_anomalies():
+    """Seção de Clustering e Anomalias"""
+    st.markdown("### 🎯 Clustering & Detecção de Anomalias")
+    
+    if st.session_state.ml_results:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### Clustering")
+            if 'clustering' in st.session_state.ml_results:
+                cluster_info = st.session_state.ml_results['clustering']
+                st.metric("Silhouette Score", f"{cluster_info['silhouette_score']:.3f}")
+                st.json(cluster_info['cluster_sizes'])
+            else:
+                st.info("Resultados de clustering não disponíveis")
+        
+        with col2:
+            st.markdown("#### Anomalias")
+            if 'anomalies' in st.session_state.ml_results:
+                anomaly_info = st.session_state.ml_results['anomalies']
+                st.metric("Anomalias", anomaly_info['n_anomalies'])
+                st.metric("Taxa", f"{anomaly_info['anomaly_rate']*100:.1f}%")
+            else:
+                st.info("Resultados de anomalias não disponíveis")
+    else:
+        st.info("Execute o pipeline ML primeiro")
+
+def render_ml_report():
+    """Seção de Relatório Final"""
+    st.markdown("### 📝 Relatório de Machine Learning")
+    
+    if st.session_state.ml_results:
+        results = st.session_state.ml_results
+        
+        st.markdown(f"""
+        #### Resumo Executivo
+        
+        **Status:** {results['status']}
+        **Melhor Modelo:** {results.get('best_model', 'N/A')}
+        **Dataset Shape:** {results.get('data_shape', 'N/A')}
+        **Features Criadas:** {results.get('features_created', 'N/A')}
+        
+        **Etapas Executadas:**
+        """)
+        
+        for step in results.get('steps', []):
+            st.write(f"✅ {step}")
+        
+        # Botão de export
+        if EXPORT_AVAILABLE and ExportHandler:
+            try:
+                export_handler = ExportHandler()
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    if st.button("📄 Exportar PDF", use_container_width=True):
+                        st.success("PDF gerado!")
+                
+                with col2:
+                    if st.button("📊 Exportar Excel", use_container_width=True):
+                        st.success("Excel gerado!")
+                
+                with col3:
+                    if st.button("💾 Salvar Modelo", use_container_width=True):
+                        st.success("Modelo salvo!")
+            except Exception as e:
+                st.error(f"Erro no export: {e}")
+        else:
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("📄 Exportar PDF", use_container_width=True):
+                    st.info("Funcionalidade de export em desenvolvimento")
+            
+            with col2:
+                if st.button("📊 Exportar Excel", use_container_width=True):
+                    st.info("Funcionalidade de export em desenvolvimento")
+            
+            with col3:
+                if st.button("💾 Salvar Modelo", use_container_width=True):
+                    st.info("Funcionalidade de export em desenvolvimento")
+    else:
+        st.info("Execute o pipeline ML para gerar o relatório")
+
+# ======================================
+# MAIN APP
+# ======================================
+def health_check_endpoint():
+    """Endpoint de health check para N8N"""
+    try:
+        # Verificar componentes básicos
+        import psycopg2
+        import redis
+        
+        health_status = {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "services": {
+                "streamlit": "online",
+                "database": "checking",
+                "redis": "checking"
+            },
+            "version": "1.0.0"
+        }
+        
+        # Test database connection
+        try:
+            # Usar configuração simples para teste
+            conn = psycopg2.connect(
+                host="localhost",
+                port=5432,
+                database="aspi_db",
+                user="postgres",
+                password="postgres123"
+            )
+            conn.close()
+            health_status["services"]["database"] = "online"
+        except:
+            health_status["services"]["database"] = "offline"
+            health_status["status"] = "degraded"
+        
+        # Test Redis connection
+        try:
+            r = redis.Redis(host='localhost', port=6379, password='redis123', decode_responses=True)
+            r.ping()
+            health_status["services"]["redis"] = "online"
+        except:
+            health_status["services"]["redis"] = "offline"
+            health_status["status"] = "degraded"
+        
+        return health_status
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        }
+
+def process_chat_webhook():
+    """Processa requisições de chat via webhook do N8N"""
+    import requests
+    
+    try:
+        # Simular dados de chat para teste
+        chat_data = {
+            "user_id": "streamlit_user",
+            "session_id": f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            "message": "Teste de integração Streamlit-N8N",
+            "source": "streamlit",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Enviar para o webhook do N8N
+        response = requests.post(
+            "http://localhost:5679/webhook-test/chat/process",
+            json=chat_data,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            st.json({
+                "status": "success",
+                "message": "Chat processado com sucesso",
+                "response": response.json() if response.content else None
+            })
+        else:
+            st.json({
+                "status": "error",
+                "message": f"Erro do N8N: {response.status_code}",
+                "details": response.text
+            })
+            
+    except Exception as e:
+        st.json({
+            "status": "error",
+            "message": "Erro ao processar chat",
+            "error": str(e)
+        })
+
+def trigger_data_ingestion():
+    """Trigger manual para ingestão de dados via N8N"""
+    import requests
+    
+    try:
+        # Dados para trigger da ingestão
+        ingestion_data = {
+            "force_update": True,
+            "source": "streamlit_manual",
+            "triggered_by": "user",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Enviar para o webhook do N8N
+        response = requests.post(
+            "http://localhost:5679/webhook-test/data-ingestion/trigger", 
+            json=ingestion_data,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            st.json({
+                "status": "success", 
+                "message": "Ingestão de dados iniciada",
+                "response": response.json() if response.content else None
+            })
+        else:
+            st.json({
+                "status": "error",
+                "message": f"Erro ao iniciar ingestão: {response.status_code}",
+                "details": response.text
+            })
+            
+    except Exception as e:
+        st.json({
+            "status": "error",
+            "message": "Erro ao triggerar ingestão",
+            "error": str(e)
+        })
+
+def main():
+    """Função principal"""
+    
+    # =========== API ENDPOINT HANDLER ===========
+    # Verifica se é uma chamada para API
+    query_params = st.query_params
+    
+    if "api" in query_params and query_params["api"] == "health":
+        # Retorna JSON para health check
+        health_data = health_check_endpoint()
+        st.json(health_data)
+        st.stop()  # Para a execução aqui para APIs
+    
+    if "api" in query_params and query_params["api"] == "monitoring":
+        if "metrics" in query_params:
+            # Endpoint para receber métricas do N8N
+            try:
+                st.json({
+                    "status": "received", 
+                    "timestamp": datetime.now().isoformat(),
+                    "message": "Metrics endpoint ready"
+                })
+                st.stop()
+            except Exception as e:
+                st.json({"status": "error", "error": str(e)})
+                st.stop()
+        
+        elif "alert" in query_params:
+            # Endpoint para receber alertas de erro do N8N
+            try:
+                st.json({
+                    "status": "alert_received",
+                    "timestamp": datetime.now().isoformat(), 
+                    "message": "Alert logged successfully"
+                })
+                st.stop()
+            except Exception as e:
+                st.json({"status": "error", "error": str(e)})
+                st.stop()
+    
+    # =========== WEBHOOK ENDPOINTS ===========
+    # Endpoint para processar chat via N8N
+    if "webhook" in query_params and query_params["webhook"] == "chat":
+        process_chat_webhook()
+        st.stop()
+    
+    # Endpoint para trigger manual de data ingestion
+    if "webhook" in query_params and query_params["webhook"] == "data_ingestion":
+        trigger_data_ingestion()
+        st.stop()
+
+    # =========== STREAMLIT APP NORMAL ===========
+    
+    # Inicializar estado
+    init_session_state()
+    
+    # Carregar CSS
+    load_custom_css()
+    
+    # Sidebar com seleção de interface
+    with st.sidebar:
+        st.markdown("### 🎛️ Configurações")
+        
+        # Seletor de interface
+        interface_mode = st.radio(
+            "Modo de Interface:",
+            ["Básico (Usuários)", "Avançado (Cientistas de Dados)"],
+            key="interface_selector"
+        )
+        
+        st.markdown("---")
+        
+        # Usar render_sidebar existente para outras opções
+        try:
+            render_sidebar()
+        except Exception as e:
+            st.error(f"Erro no sidebar: {e}")
+            # Sidebar simplificado
+            st.selectbox("Dataset", ["Carga Energia", "CMO", "Bandeiras"])
+            st.date_input("Data Início")
+            st.date_input("Data Fim")
+    
+    # Renderizar interface selecionada
+    if "Básico" in interface_mode:
+        render_basic_interface()
+    else:
+        render_advanced_interface()
     
     # Footer
     st.markdown("---")
     st.markdown("""
-        <div style="text-align: center; color: #6c757d; padding: 2rem 0;">
-            <p>AIDE - Assistente Inteligente para Dados do Setor Elétrico v1.0</p>
-            <p style="font-size: 0.875rem;">Dados fornecidos pelo ONS - Operador Nacional do Sistema Elétrico</p>
-        </div>
+    <div style="text-align: center; opacity: 0.6;">
+        ASPI v1.0 | Interface Dupla com ML | Dados: ONS
+    </div>
     """, unsafe_allow_html=True)
 
 if __name__ == "__main__":

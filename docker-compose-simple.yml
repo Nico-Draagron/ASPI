@@ -1,0 +1,111 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: aspi-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aspi_db
+      POSTGRES_USER: aspi
+      POSTGRES_PASSWORD: aspi123
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C.UTF-8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - aspi_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aspi -d aspi_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache  
+  redis:
+    image: redis:7-alpine
+    container_name: aspi-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass redis123
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - aspi_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # n8n Workflow Engine - Versão Mais Recente e Configuração Simples
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: aspi-n8n
+    restart: unless-stopped
+    environment:
+      # Configurações básicas
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - N8N_SECURE_COOKIE=false
+      
+      # IMPORTANTE: Sem autenticação básica forçada
+      - N8N_BASIC_AUTH_ACTIVE=false
+      
+      # URL de webhook
+      - WEBHOOK_URL=http://localhost:5679
+      
+      # Configurações de timezone
+      - GENERIC_TIMEZONE=America/Sao_Paulo
+      - TZ=America/Sao_Paulo
+      
+      # Configurações de log e métricas
+      - N8N_METRICS=true
+      - N8N_LOG_LEVEL=info
+      
+      # Chave de criptografia
+      - N8N_ENCRYPTION_KEY=aspi-encryption-key-2024
+      
+      # Configurações para permitir gerenciamento de usuários
+      - N8N_USER_MANAGEMENT_DISABLED=false
+      - N8N_PUBLIC_API_DISABLED=false
+      
+      # Permitir acesso a variáveis de ambiente (útil para desenvolvimento)
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      
+    ports:
+      - "5679:5678"  # Porta externa 5679 para evitar conflito
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows/n8n:/tmp/workflows
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - aspi_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  aspi_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  n8n_data:
+    driver: local

@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import pandas as pd
 from pathlib import Path
@@ -8,7 +9,7 @@ from tqdm import tqdm
 import traceback
 
 # 🔹 Diretório base de saída
-OUTPUT_DIR = Path("dados_ons")
+OUTPUT_DIR = Path(__file__).parent / "dados_ons"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # Configuração de logging
@@ -140,15 +141,24 @@ def salvar_csv(dataset, df, area="BR"):
 # ==========================================================
 # Execução principal
 # ==========================================================
+def processar_dataset(dataset, cfg):
+    try:
+        if cfg["type"] == "api":
+            df = baixar_api(dataset, cfg)
+            if df is not None:
+                salvar_csv(dataset, df)
+        elif cfg["type"] == "ckan":
+            baixar_ckan(dataset)
+        return dataset, "ok"
+    except Exception as e:
+        logging.error(f"❌ Erro no dataset {dataset}: {e}")
+        logging.error(traceback.format_exc())
+        return dataset, f"erro: {e}"
+
 if __name__ == "__main__":
-    for dataset, cfg in DATASETS.items():
-        try:
-            if cfg["type"] == "api":
-                df = baixar_api(dataset, cfg)
-                if df is not None:
-                    salvar_csv(dataset, df)
-            elif cfg["type"] == "ckan":
-                baixar_ckan(dataset)
-        except Exception as e:
-            logging.error(f"❌ Erro no dataset {dataset}: {e}")
-            logging.error(traceback.format_exc())
+    max_workers = min(4, len(DATASETS))  # Ajuste conforme sua conexão/CPU
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(processar_dataset, dataset, cfg) for dataset, cfg in DATASETS.items()]
+        for future in as_completed(futures):
+            dataset, status = future.result()
+            logging.info(f"[PARALELO] {dataset}: {status}")

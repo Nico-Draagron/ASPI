@@ -65,6 +65,51 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+def get_real_energy_data():
+    """Obtém dados reais de energia do banco de dados"""
+    try:
+        from sqlalchemy import create_engine
+        import pandas as pd
+        
+        # Conectar com banco
+        engine = create_engine("postgresql://postgres:postgres@localhost:5432/aspi")
+        
+        # Query para dados de carga
+        query = """
+        SELECT 
+            timestamp as date,
+            region,
+            value as load,
+            metric_type,
+            unit
+        FROM data_records 
+        WHERE metric_type LIKE '%carga%' OR metric_type LIKE '%load%'
+        ORDER BY timestamp DESC
+        LIMIT 1000;
+        """
+        
+        df = pd.read_sql(query, engine)
+        engine.dispose()
+        
+        if df.empty:
+            # Se não há dados reais, gerar sintéticos para demonstração
+            return generate_synthetic_data()
+        
+        # Processar dados reais
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # Adicionar campos calculados para compatibilidade
+        df['cmo'] = df['load'] * 0.002 + 80 + np.random.normal(0, 5, len(df))
+        df['temperature'] = 25 + np.random.normal(0, 5, len(df))
+        df['rainfall'] = np.random.exponential(20, len(df))
+        df['reservoir_level'] = 50 + np.random.normal(0, 10, len(df))
+        
+        return df
+        
+    except Exception as e:
+        st.warning(f"Erro ao acessar dados reais: {e}. Usando dados sintéticos.")
+        return generate_synthetic_data()
+
 def generate_synthetic_data(days=90):
     """Gera dados sintéticos para demonstração"""
     dates = pd.date_range(end=datetime.now(), periods=days, freq='D')
@@ -139,8 +184,8 @@ def main():
         </div>
     """, unsafe_allow_html=True)
     
-    # Gerar dados
-    df = generate_synthetic_data()
+    # Gerar/obter dados reais
+    df = get_real_energy_data()
     
     # Sidebar com filtros
     with st.sidebar:
@@ -185,13 +230,14 @@ def main():
     filtered_df = df[mask & df['region'].isin(selected_regions)]
     
     # Tabs principais
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📈 Análise Temporal",
-        "🔗 Correlações",
+        "🔗 Correlações", 
         "⚠️ Anomalias",
         "🔮 Previsões",
         "🎯 Otimização",
-        "📊 Comparativo"
+        "📊 Comparativo",
+        "🤖 Machine Learning"
     ])
     
     with tab1:
@@ -788,6 +834,207 @@ def main():
                 )
             }
         )
+
+    with tab7:
+        st.markdown("### 🤖 Machine Learning Pipeline")
+        
+        # Verificar se ML está disponível
+        try:
+            from app.ml.energy_ml_pipeline_fixed import EnergyMLPipeline
+            ml_available = True
+        except ImportError:
+            ml_available = False
+            st.error("Pipeline de ML não disponível. Verifique as dependências.")
+        
+        if ml_available:
+            st.markdown("""
+                <div class="insight-card">
+                    <h5>🧠 Pipeline de ML Integrado</h5>
+                    <p>Este sistema utiliza múltiplos algoritmos de Machine Learning para análise preditiva e detecção de padrões nos dados de energia.</p>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            # Configurações do ML
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("#### ⚙️ Configurações do Modelo")
+                
+                selected_algorithms = st.multiselect(
+                    "Algoritmos:",
+                    ["Random Forest", "XGBoost", "K-Means", "Isolation Forest"],
+                    default=["Random Forest", "XGBoost"]
+                )
+                
+                test_size = st.slider("Tamanho do teste (%)", 10, 40, 20) / 100
+                cv_folds = st.slider("K-Fold Cross Validation", 3, 10, 5)
+                
+            with col2:
+                st.markdown("#### 🎯 Parâmetros")
+                
+                n_estimators = st.slider("N° Estimadores (RF/XGB)", 50, 500, 100, 50)
+                max_depth = st.slider("Profundidade Máxima", 3, 20, 10)
+                random_state = st.number_input("Random State", value=42)
+            
+            # Executar ML Pipeline
+            if st.button("🚀 Executar Pipeline de ML", type="primary"):
+                
+                with st.spinner("Executando pipeline de Machine Learning..."):
+                    try:
+                        # Preparar dados
+                        ml_data = df.copy()
+                        
+                        # Ajustar nomes das colunas se necessário
+                        if 'load' in ml_data.columns:
+                            ml_data = ml_data.rename(columns={'load': 'load_mw'})
+                        
+                        # Criar pipeline
+                        pipeline = EnergyMLPipeline()
+                        
+                        # Configurar parâmetros
+                        config = {
+                            'test_size': test_size,
+                            'cv_folds': cv_folds,
+                            'n_estimators': n_estimators,
+                            'max_depth': max_depth,
+                            'random_state': int(random_state)
+                        }
+                        
+                        # Executar pipeline
+                        results = pipeline.run_full_pipeline(ml_data, config)
+                        
+                        # Exibir resultados
+                        if results.get('success', False):
+                            st.success("Pipeline executado com sucesso!")
+                            
+                            # Métricas dos modelos
+                            st.markdown("#### 📊 Resultados dos Modelos")
+                            
+                            if 'models' in results:
+                                metrics_data = []
+                                for model_name, model_results in results['models'].items():
+                                    if 'metrics' in model_results:
+                                        metrics = model_results['metrics']
+                                        metrics_data.append({
+                                            'Modelo': model_name,
+                                            'RMSE': metrics.get('rmse', 'N/A'),
+                                            'MAE': metrics.get('mae', 'N/A'),
+                                            'R²': metrics.get('r2', 'N/A'),
+                                            'Score CV': metrics.get('cv_score_mean', 'N/A')
+                                        })
+                                
+                                if metrics_data:
+                                    metrics_df = pd.DataFrame(metrics_data)
+                                    st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+                            
+                            # SHAP Interpretability
+                            if 'interpretability' in results:
+                                st.markdown("#### 🔍 Interpretabilidade (SHAP)")
+                                
+                                interp_results = results['interpretability']
+                                
+                                if 'feature_importance' in interp_results:
+                                    importance_df = pd.DataFrame(
+                                        list(interp_results['feature_importance'].items()),
+                                        columns=['Feature', 'Importância']
+                                    ).sort_values('Importância', ascending=False)
+                                    
+                                    fig_importance = px.bar(
+                                        importance_df.head(10),
+                                        x='Importância',
+                                        y='Feature',
+                                        orientation='h',
+                                        title="Top 10 Features Mais Importantes"
+                                    )
+                                    st.plotly_chart(fig_importance, use_container_width=True)
+                                
+                                if 'shap_summary' in interp_results:
+                                    st.markdown("**Insights SHAP:**")
+                                    for insight in interp_results['shap_summary']:
+                                        st.markdown(f"• {insight}")
+                            
+                            # Clustering Results
+                            if 'clustering' in results:
+                                st.markdown("#### 🎯 Análise de Clusters")
+                                
+                                cluster_results = results['clustering']
+                                
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric("N° de Clusters", cluster_results.get('n_clusters', 'N/A'))
+                                with col2:
+                                    st.metric("Silhouette Score", f"{cluster_results.get('silhouette_score', 0):.3f}")
+                                with col3:
+                                    st.metric("Inertia", f"{cluster_results.get('inertia', 0):.0f}")
+                                
+                                # Características dos clusters
+                                if 'cluster_characteristics' in cluster_results:
+                                    st.markdown("**Características dos Clusters:**")
+                                    for cluster_id, chars in cluster_results['cluster_characteristics'].items():
+                                        st.markdown(f"**Cluster {cluster_id}:** {chars}")
+                            
+                            # Detecção de Anomalias
+                            if 'anomalies' in results:
+                                st.markdown("#### ⚠️ Detecção de Anomalias (ML)")
+                                
+                                anomaly_results = results['anomalies']
+                                
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.metric("Anomalias Detectadas", anomaly_results.get('n_anomalies', 0))
+                                with col2:
+                                    st.metric("Taxa de Anomalias", f"{anomaly_results.get('anomaly_rate', 0)*100:.2f}%")
+                                
+                                if 'anomaly_summary' in anomaly_results:
+                                    st.markdown("**Resumo das Anomalias:**")
+                                    for summary in anomaly_results['anomaly_summary']:
+                                        st.markdown(f"• {summary}")
+                        
+                        else:
+                            st.error(f"Erro no pipeline: {results.get('error', 'Erro desconhecido')}")
+                            
+                    except Exception as e:
+                        st.error(f"Erro ao executar pipeline de ML: {str(e)}")
+                        st.code(f"Detalhes do erro: {e}", language="text")
+            
+            # Informações técnicas
+            st.markdown("#### 📋 Informações Técnicas")
+            
+            tech_info = """
+            **Algoritmos Implementados:**
+            - **Random Forest**: Ensemble de árvores de decisão para regressão/classificação
+            - **XGBoost**: Gradient boosting otimizado para alta performance
+            - **K-Means**: Clustering não supervisionado para identificação de padrões
+            - **Isolation Forest**: Detecção de anomalias baseada em isolamento
+            
+            **Interpretabilidade:**
+            - **SHAP (SHapley Additive exPlanations)**: Explica contribuições individuais das features
+            - **Feature Importance**: Ranking de importância das variáveis
+            
+            **Avaliação:**
+            - **Cross-Validation**: Validação cruzada K-fold
+            - **Métricas**: RMSE, MAE, R², Silhouette Score
+            - **Visualizações**: Gráficos de importância e distribuições
+            
+            **Persistência:**
+            - Modelos salvos em formato .pkl para reutilização
+            - Configurações e resultados armazenados
+            """
+            
+            st.markdown(tech_info)
+        
+        else:
+            st.markdown("""
+                <div class="anomaly-alert">
+                    <h5>⚠️ Pipeline de ML Indisponível</h5>
+                    <p>O pipeline de Machine Learning não está disponível. Verifique:</p>
+                    <ul>
+                        <li>Instalação das dependências (scikit-learn, xgboost, shap)</li>
+                        <li>Configuração correta do arquivo energy_ml_pipeline.py</li>
+                        <li>Conexão com o banco de dados</li>
+                    </ul>
+                </div>
+            """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()

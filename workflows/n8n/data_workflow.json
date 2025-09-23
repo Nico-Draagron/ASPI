@@ -1,0 +1,946 @@
+{
+  "name": "data_workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours"
+            }
+          ]
+        }
+      },
+      "id": "8203d960-c956-454c-bde9-68f0faea7f37",
+      "name": "Trigger Horário",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -1344,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "data-ingestion/trigger",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "02762a94-c558-4520-a3ac-bad875d1ce41",
+      "name": "Webhook Manual Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        -1312,
+        144
+      ],
+      "webhookId": "aide-data-ingestion-manual"
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:8502/?api=health",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "94906820-dad6-4c1a-b98b-d9d15fb1dc98",
+      "name": "Health Check Sistema",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1120,
+        -64
+      ],
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "healthy",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ae01f670-da7d-4c75-b3f6-82a94f912682",
+      "name": "Sistema Disponível?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [
+        -912,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://dados.ons.org.br/api/v1/datasets",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "e2589eaa-aac6-4d44-b304-7eaf9d3e3fd2",
+      "name": "Buscar Lista Datasets ONS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -720,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT dataset_id, external_id, last_updated, update_frequency, metadata->>'version' as version FROM datasets WHERE source_type = 'ONS' AND NOT deleted_at IS NOT NULL",
+        "options": {}
+      },
+      "id": "ee897261-f323-463d-8f5b-da619af4c873",
+      "name": "Consultar Datasets BD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -720,
+        48
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "lLK1VJvikwFE7C9e",
+          "name": "AIDE PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const onsDatasets = items[0].json;  // Pode não ter .datasets// Comparar datasets ONS com BD e identificar atualizações\nconst onsResponse = items[0].json;\nconst dbDatasets = items[1].json;\n\n// Ajustar para estrutura da API ONS\nconst onsDatasets = onsResponse.datasets || onsResponse || [];\nconst datasetsToUpdate = [];\nconst criticalDatasets = ['carga_energia', 'cmo_pld', 'bandeiras_tarifarias'];\n\n// Verificar se recebemos dados válidos\nif (!Array.isArray(onsDatasets)) {\n  console.log('⚠️ Dados ONS inválidos:', onsResponse);\n  return [];\n}\n\nif (!Array.isArray(dbDatasets)) {\n  console.log('⚠️ Dados BD inválidos:', dbDatasets);\n  return [];\n}\n\nfor (const onsDataset of onsDatasets) {\n  const dbDataset = dbDatasets.find(d => d.external_id === onsDataset.id);\n  \n  if (!dbDataset) {\n    datasetsToUpdate.push({\n      ...onsDataset,\n      action: 'create',\n      priority: criticalDatasets.includes(onsDataset.id) ? 'critical' : 'high',\n      version: onsDataset.version || '1.0'\n    });\n  } else {\n    const lastUpdate = new Date(dbDataset.last_updated);\n    const onsUpdate = new Date(onsDataset.updated_at);\n    \n    if (onsUpdate > lastUpdate || onsDataset.version !== dbDataset.version) {\n      datasetsToUpdate.push({\n        ...onsDataset,\n        action: 'update',\n        priority: criticalDatasets.includes(onsDataset.id) ? 'critical' : 'normal',\n        version: onsDataset.version || dbDataset.version\n      });\n    }\n  }\n}\n\n// Ordenar por prioridade\ndatasetsToUpdate.sort((a, b) => {\n  const priorityOrder = { critical: 0, high: 1, normal: 2 };\n  return priorityOrder[a.priority] - priorityOrder[b.priority];\n});\n\n// Log para debugging\nconsole.log(`📊 Encontrados ${datasetsToUpdate.length} datasets para atualizar`);\nconsole.log('🔄 Datasets:', datasetsToUpdate.map(d => `${d.id} (${d.action}, ${d.priority})`));\n\n// Adicionar timestamp de processamento\nreturn datasetsToUpdate.map(dataset => ({\n  json: {\n    ...dataset,\n    processing_start: new Date().toISOString(),\n    batch_id: `batch_${Date.now()}`\n  }\n}));"
+      },
+      "id": "2ae09795-7566-4c2d-b008-955f66e310d9",
+      "name": "Comparar e Priorizar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -512,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 3,
+        "options": {}
+      },
+      "id": "466dc7b3-fdc9-4b57-9b5c-bffd82103571",
+      "name": "Dividir em Lotes",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -320,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://dados.ons.org.br/api/v1/datasets/{{$json.id}}/data",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "start_date",
+              "value": "={{$today.minus(7, 'day').toISO()}}"
+            },
+            {
+              "name": "end_date",
+              "value": "={{$today.toISO()}}"
+            },
+            {
+              "name": "format",
+              "value": "json"
+            },
+            {
+              "name": "limit",
+              "value": "10000"
+            },
+            {}
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "53f5c91b-b480-4c16-b6c9-8c81a566742d",
+      "name": "Baixar Dados Dataset",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -112,
+        -64
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const rawData = $input.first().json;\nconst datasetInfo = $('split-batches').first().json;\nconst datasetId = datasetInfo.id;\n\n// Validações aprimoradas\nif (!rawData) {\n  throw new Error(`Resposta vazia da API ONS para dataset ${datasetId}`);\n}\n\nif (!rawData.data || !Array.isArray(rawData.data)) {\n  console.log(`⚠️ Estrutura de dados inesperada para ${datasetId}:`, rawData);\n  throw new Error(`Dados inválidos para dataset ${datasetId} - esperado array em 'data'`);\n}\n\nif (rawData.data.length === 0) {\n  console.log(`ℹ️ Nenhum dado novo encontrado para ${datasetId}`);\n  return []; // Retorna array vazio se não há dados\n}\n\nconsole.log(`📊 Processando ${rawData.data.length} registros do dataset ${datasetId}`);\n\nlet transformedData = [];\nconst processingTime = new Date();\n\n// Função auxiliar para validar e parsear datas\nfunction parseDate(dateStr, fallback = processingTime) {\n  if (!dateStr) return fallback;\n  const parsed = new Date(dateStr);\n  return isNaN(parsed.getTime()) ? fallback : parsed;\n}\n\n// Função auxiliar para validar e parsear números\nfunction parseValue(value, fallback = 0) {\n  const parsed = parseFloat(value);\n  return isNaN(parsed) ? fallback : parsed;\n}\n\nswitch(datasetId) {\n  case 'carga_energia':\n    transformedData = rawData.data.map(row => {\n      const timestamp = parseDate(row.din_instante);\n      \n      return {\n        dataset_id: datasetId,\n        period_start: timestamp,\n        period_end: timestamp,\n        year: timestamp.getFullYear(),\n        month: timestamp.getMonth() + 1,\n        day: timestamp.getDate(),\n        hour: timestamp.getHours(),\n        region: row.nom_subsistema || 'Unknown',\n        subsystem: row.nom_subsistema || 'Unknown',\n        metric_type: 'load',\n        metric_name: 'carga_energia',\n        value: parseValue(row.val_cargaenergiamwmed),\n        unit: 'MWmed',\n        raw_data: row,\n        processed_data: {\n          id_subsistema: row.id_subsistema,\n          quality_flag: row.quality || 'verified',\n          processing_version: datasetInfo.version,\n          data_source: 'ONS_API'\n        }\n      };\n    });\n    break;\n    \n  case 'cmo_pld':\n    transformedData = rawData.data.map(row => {\n      const timestamp = parseDate(row.din_instante);\n      \n      return {\n        dataset_id: datasetId,\n        period_start: timestamp,\n        period_end: timestamp,\n        year: timestamp.getFullYear(),\n        month: timestamp.getMonth() + 1,\n        day: timestamp.getDate(),\n        hour: 0,\n        region: row.nom_subsistema || 'Unknown',\n        subsystem: row.nom_subsistema || 'Unknown',\n        metric_type: 'price',\n        metric_name: 'cmo',\n        value: parseValue(row.val_cmomediasemanal || row.val_cmo),\n        unit: 'R$/MWh',\n        raw_data: row,\n        processed_data: {\n          patamar: row.patamar || 'medio',\n          tipo: row.tipo_preco || 'cmo',\n          processing_version: datasetInfo.version,\n          data_source: 'ONS_API'\n        }\n      };\n    });\n    break;\n    \n  case 'bandeiras_tarifarias':\n    transformedData = rawData.data.map(row => {\n      const timestamp = parseDate(row.DatCompetencia);\n      \n      return {\n        dataset_id: datasetId,\n        period_start: timestamp,\n        period_end: timestamp,\n        year: timestamp.getFullYear(),\n        month: timestamp.getMonth() + 1,\n        day: 1,\n        hour: 0,\n        region: 'Brasil',\n        subsystem: 'Nacional',\n        metric_type: 'tariff',\n        metric_name: 'bandeira_tarifaria',\n        value: parseValue(row.VlrAdicionalBandeira),\n        unit: 'R$/100kWh',\n        raw_data: row,\n        processed_data: {\n          bandeira: row.NomBandeiraAcionada || 'Unknown',\n          vigencia: row.DatGeracaoConjuntoDados,\n          processing_version: datasetInfo.version,\n          data_source: 'ONS_API'\n        }\n      };\n    });\n    break;\n    \n  default:\n    console.log(`⚠️ Dataset não reconhecido: ${datasetId}. Usando transformação genérica.`);\n    transformedData = rawData.data.map(row => ({\n      dataset_id: datasetId,\n      period_start: processingTime,\n      period_end: processingTime,\n      year: processingTime.getFullYear(),\n      month: processingTime.getMonth() + 1,\n      day: processingTime.getDate(),\n      hour: processingTime.getHours(),\n      region: 'Unknown',\n      subsystem: 'Unknown',\n      metric_type: 'generic',\n      metric_name: datasetId,\n      value: 0,\n      unit: 'unit',\n      raw_data: row,\n      processed_data: {\n        processing_version: datasetInfo.version,\n        data_source: 'ONS_API',\n        note: 'Generic transformation applied'\n      }\n    }));\n}\n\n// Filtrar registros inválidos (com datas muito antigas ou muito futuras)\nconst validData = transformedData.filter(item => {\n  const year = item.year;\n  return year >= 2020 && year <= 2030; // Filtro de sanidade\n});\n\nif (validData.length !== transformedData.length) {\n  console.log(`⚠️ Filtrados ${transformedData.length - validData.length} registros com datas inválidas`);\n}\n\nconsole.log(`✅ Transformação concluída: ${validData.length} registros válidos`);\n\n// Adicionar metadados de processamento\nreturn validData.map(item => ({\n  json: {\n    ...item,\n    created_at: processingTime.toISOString(),\n    batch_id: datasetInfo.batch_id,\n    processing_timestamp: Date.now()\n  }\n}));"
+      },
+      "id": "6b92b9b3-acda-47a3-87cb-772974d45f9c",
+      "name": "Validar e Transformar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        96,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "schema": "public",
+        "table": "data_records",
+        "columns": {
+          "0": "d",
+          "1": "a",
+          "2": "t",
+          "3": "a",
+          "4": "s",
+          "5": "e",
+          "6": "t",
+          "7": "_",
+          "8": "i",
+          "9": "d",
+          "10": ",",
+          "11": "p",
+          "12": "e",
+          "13": "r",
+          "14": "i",
+          "15": "o",
+          "16": "d",
+          "17": "_",
+          "18": "s",
+          "19": "t",
+          "20": "a",
+          "21": "r",
+          "22": "t",
+          "23": ",",
+          "24": "p",
+          "25": "e",
+          "26": "r",
+          "27": "i",
+          "28": "o",
+          "29": "d",
+          "30": "_",
+          "31": "e",
+          "32": "n",
+          "33": "d",
+          "34": ",",
+          "35": "y",
+          "36": "e",
+          "37": "a",
+          "38": "r",
+          "39": ",",
+          "40": "m",
+          "41": "o",
+          "42": "n",
+          "43": "t",
+          "44": "h",
+          "45": ",",
+          "46": "d",
+          "47": "a",
+          "48": "y",
+          "49": ",",
+          "50": "h",
+          "51": "o",
+          "52": "u",
+          "53": "r",
+          "54": ",",
+          "55": "r",
+          "56": "e",
+          "57": "g",
+          "58": "i",
+          "59": "o",
+          "60": "n",
+          "61": ",",
+          "62": "s",
+          "63": "u",
+          "64": "b",
+          "65": "s",
+          "66": "y",
+          "67": "s",
+          "68": "t",
+          "69": "e",
+          "70": "m",
+          "71": ",",
+          "72": "m",
+          "73": "e",
+          "74": "t",
+          "75": "r",
+          "76": "i",
+          "77": "c",
+          "78": "_",
+          "79": "t",
+          "80": "y",
+          "81": "p",
+          "82": "e",
+          "83": ",",
+          "84": "m",
+          "85": "e",
+          "86": "t",
+          "87": "r",
+          "88": "i",
+          "89": "c",
+          "90": "_",
+          "91": "n",
+          "92": "a",
+          "93": "m",
+          "94": "e",
+          "95": ",",
+          "96": "v",
+          "97": "a",
+          "98": "l",
+          "99": "u",
+          "100": "e",
+          "101": ",",
+          "102": "u",
+          "103": "n",
+          "104": "i",
+          "105": "t",
+          "106": ",",
+          "107": "r",
+          "108": "a",
+          "109": "w",
+          "110": "_",
+          "111": "d",
+          "112": "a",
+          "113": "t",
+          "114": "a",
+          "115": ",",
+          "116": "p",
+          "117": "r",
+          "118": "o",
+          "119": "c",
+          "120": "e",
+          "121": "s",
+          "122": "s",
+          "123": "e",
+          "124": "d",
+          "125": "_",
+          "126": "d",
+          "127": "a",
+          "128": "t",
+          "129": "a",
+          "130": ",",
+          "131": "c",
+          "132": "r",
+          "133": "e",
+          "134": "a",
+          "135": "t",
+          "136": "e",
+          "137": "d",
+          "138": "_",
+          "139": "a",
+          "140": "t",
+          "mappingMode": "defineBelow",
+          "value": {
+            "year": "={{$json.year}}",
+            "day": "={{$json.day}}",
+            "dataset_id": "={{$json.dataset_id}}",
+            "period_start": "={{$json.period_start}}",
+            "period_end": "={{$json.period_end}}",
+            "subsystem": "={{$json.subsystem}}",
+            "metric_name": "={{$json.metric_name}}",
+            "value": "={{$json.value}}",
+            "unit": "={{$json.unit}}",
+            "processed_data": "={{JSON.stringify($json.processed_data)}}",
+            "created_at": "={{$json.created_at}}",
+            "month": "={{$json.month}}",
+            "hour": "={{$json.hour}}",
+            "region": "={{$json.region}}",
+            "metric_type": "={{$json.metric_type}}",
+            "raw_data": "={{JSON.stringify($json.raw_data)}}"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "dataset_id",
+              "displayName": "dataset_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "period_start",
+              "displayName": "period_start",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "period_end",
+              "displayName": "period_end",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "subsystem",
+              "displayName": "subsystem",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "metric_name",
+              "displayName": "metric_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "value",
+              "displayName": "value",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "unit",
+              "displayName": "unit",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "processed_data",
+              "displayName": "processed_data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "year",
+              "displayName": "year",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "month",
+              "displayName": "month",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "day",
+              "displayName": "day",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "hour",
+              "displayName": "hour",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "region",
+              "displayName": "region",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "metric_type",
+              "displayName": "metric_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "raw_data",
+              "displayName": "raw_data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "9ffa1c55-b917-4a8a-be6c-370ea59aa104",
+      "name": "Inserir Dados no BD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        288,
+        -64
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "lLK1VJvikwFE7C9e",
+          "name": "AIDE PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH stats AS (\n  SELECT \n    COUNT(*) as total_records,\n    MIN(period_start) as oldest_data,\n    MAX(period_start) as newest_data\n  FROM data_records \n  WHERE dataset_id = '{{$('split-batches').first().json.id}}'\n    AND created_at >= NOW() - INTERVAL '1 hour'\n),\ncurrent_dataset AS (\n  SELECT dataset_id, row_count \n  FROM datasets \n  WHERE external_id = '{{$('split-batches').first().json.id}}'\n)\nUPDATE datasets \nSET \n  last_updated = NOW(),\n  row_count = COALESCE((SELECT total_records FROM stats), 0) + COALESCE(row_count, 0),\n  metadata = jsonb_set(\n    COALESCE(metadata, '{}'),\n    '{last_ingestion}',\n    json_build_object(\n      'records_added', COALESCE((SELECT total_records FROM stats), 0),\n      'oldest_data', (SELECT oldest_data FROM stats),\n      'newest_data', (SELECT newest_data FROM stats),\n      'batch_id', '{{$('split-batches').first().json.batch_id}}',\n      'version', '{{$('split-batches').first().json.version}}',\n      'ingestion_timestamp', NOW(),\n      'status', 'completed'\n    )::jsonb\n  )\nWHERE external_id = '{{$('split-batches').first().json.id}}'\nRETURNING \n  dataset_id,\n  external_id,\n  last_updated,\n  row_count,\n  metadata->'last_ingestion' as last_ingestion_info;",
+        "options": {}
+      },
+      "id": "110cb02f-f256-4e09-8662-608916a75c0d",
+      "name": "Atualizar Status Dataset",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        496,
+        -64
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "lLK1VJvikwFE7C9e",
+          "name": "AIDE PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Coletar métricas de ingestão\nconst dataset = $('split-batches').first().json;\nconst insertResult = $('insert-data').first()?.json;\nconst updateResult = $('update-dataset-status').first()?.json;\nconst transformData = $('transform-data').all();\n\n// Validações básicas\nif (!dataset) {\n  console.log('❌ Erro: Informações do dataset não encontradas');\n  return {json: {\n    workflow_name: 'data_ingestion',\n    status: 'error',\n    error: 'Dataset information missing',\n    timestamp: new Date().toISOString()\n  }};\n}\n\nconst processingEnd = new Date();\nconst processingStart = new Date(dataset.processing_start);\nconst processingTime = processingEnd - processingStart;\n\n// Calcular estatísticas detalhadas\nconst recordsProcessed = transformData.length;\nconst recordsPerSecond = processingTime > 0 ? Math.round((recordsProcessed * 1000) / processingTime) : 0;\n\n// Detectar possíveis problemas\nconst hasInsertErrors = !insertResult || insertResult.error;\nconst hasUpdateErrors = !updateResult || updateResult.error;\nconst processingStatus = hasInsertErrors || hasUpdateErrors ? 'partial_success' : 'success';\n\n// Métricas de performance\nconst performanceMetrics = {\n  processing_time_ms: processingTime,\n  processing_time_seconds: Math.round(processingTime / 1000),\n  records_per_second: recordsPerSecond,\n  avg_time_per_record_ms: recordsProcessed > 0 ? Math.round(processingTime / recordsProcessed) : 0\n};\n\n// Métricas de qualidade dos dados\nconst dataQualityMetrics = {\n  total_records_input: recordsProcessed,\n  records_inserted: insertResult?.affectedRows || insertResult?.rowCount || recordsProcessed,\n  success_rate: recordsProcessed > 0 ? Math.round((insertResult?.affectedRows || recordsProcessed) / recordsProcessed * 100) : 100\n};\n\nconst metrics = {\n  workflow_name: 'data_ingestion',\n  dataset_id: dataset.id,\n  dataset_name: dataset.name || dataset.id,\n  batch_id: dataset.batch_id,\n  priority: dataset.priority,\n  action: dataset.action,\n  records_processed: recordsProcessed,\n  processing_time_ms: processingTime,\n  status: processingStatus,\n  timestamp: processingEnd.toISOString(),\n  \n  // Métricas detalhadas\n  performance: performanceMetrics,\n  data_quality: dataQualityMetrics,\n  \n  // Metadados expandidos\n  metadata: {\n    version: dataset.version,\n    processing_start: dataset.processing_start,\n    processing_end: processingEnd.toISOString(),\n    \n    // Dados do update\n    row_count_after: updateResult?.row_count,\n    last_updated: updateResult?.last_updated,\n    \n    // Informações de ingestão\n    ingestion_info: updateResult?.last_ingestion_info,\n    \n    // Status dos nós anteriores\n    insert_status: hasInsertErrors ? 'error' : 'success',\n    update_status: hasUpdateErrors ? 'error' : 'success',\n    \n    // Informações do sistema\n    n8n_execution_id: $execution.id,\n    workflow_version: '1.0.0'\n  },\n  \n  // Alertas se houver problemas\n  alerts: [\n    ...(processingTime > 300000 ? ['Processing time exceeded 5 minutes'] : []),\n    ...(recordsPerSecond < 10 && recordsProcessed > 100 ? ['Low processing speed detected'] : []),\n    ...(hasInsertErrors ? ['Insert operation had errors'] : []),\n    ...(hasUpdateErrors ? ['Update operation had errors'] : [])\n  ]\n};\n\n// Log das métricas para debug\nconsole.log(`📊 Métricas coletadas para ${dataset.id}:`);\nconsole.log(`   Records: ${recordsProcessed}`);\nconsole.log(`   Time: ${Math.round(processingTime/1000)}s`);\nconsole.log(`   Speed: ${recordsPerSecond} records/sec`);\nconsole.log(`   Status: ${processingStatus}`);\n\nif (metrics.alerts.length > 0) {\n  console.log(`⚠️ Alertas: ${metrics.alerts.join(', ')}`);\n}\n\nreturn {json: metrics};"
+      },
+      "id": "ee0e6ddf-162d-41c4-a5d5-9af1ff0e29c7",
+      "name": "Coletar Métricas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8502/api/monitoring/metrics",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify($json)}}",
+        "options": {}
+      },
+      "id": "6ec5964b-f1c7-4372-9687-f4a3865133ab",
+      "name": "Enviar Métricas p/ Monitoring",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        896,
+        -64
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "=ingestion:status:{{$json.dataset_id}}",
+        "value": "={{JSON.stringify($json)}}",
+        "expire": true,
+        "ttl": 3600
+      },
+      "id": "647f08e1-f023-490a-a90a-cdf549efb232",
+      "name": "Cache Status Redis",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        1088,
+        -64
+      ],
+      "credentials": {
+        "redis": {
+          "id": "mxMZ57xkDreBg3Fx",
+          "name": "AIDE Redis"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Tratar erros do workflow de ingestão\nconst error = $execution.error || {};\nconst dataset = $('split-batches').first()?.json || {};\nconst currentNode = $node.name || 'unknown';\nconst executionId = $execution.id || 'unknown';\n\n// Tentar capturar informações do nó que falhou\nconst failedNodeData = $input.first()?.json || {};\nconst httpError = failedNodeData.statusCode || failedNodeData.status;\n\n// Classificar tipo de erro\nlet errorType = 'unknown';\nlet severity = 'medium';\n\nif (error.message?.includes('timeout') || error.message?.includes('TIMEOUT')) {\n  errorType = 'timeout';\n  severity = 'high';\n} else if (error.message?.includes('ECONNREFUSED') || error.message?.includes('ENOTFOUND')) {\n  errorType = 'connection';\n  severity = 'critical';\n} else if (httpError >= 400 && httpError < 500) {\n  errorType = 'client_error';\n  severity = httpError === 404 ? 'medium' : 'high';\n} else if (httpError >= 500) {\n  errorType = 'server_error';\n  severity = 'critical';\n} else if (error.message?.includes('SQL') || error.message?.includes('database')) {\n  errorType = 'database';\n  severity = 'critical';\n} else if (error.message?.includes('JSON') || error.message?.includes('parse')) {\n  errorType = 'data_format';\n  severity = 'medium';\n}\n\n// Determinar se é erro crítico (para datasets prioritários)\nconst isCriticalDataset = ['carga_energia', 'cmo_pld', 'bandeiras_tarifarias'].includes(dataset.id);\nif (isCriticalDataset && severity !== 'medium') {\n  severity = 'critical';\n}\n\nconst errorLog = {\n  workflow: 'data_ingestion',\n  execution_id: executionId,\n  node_name: currentNode,\n  dataset_id: dataset.id || 'unknown',\n  dataset_name: dataset.name || dataset.id || 'unknown',\n  batch_id: dataset.batch_id || 'unknown',\n  timestamp: new Date().toISOString(),\n  \n  // Informações do erro\n  error: {\n    type: errorType,\n    severity: severity,\n    message: error.message || 'Unknown error',\n    stack: error.stack,\n    code: error.code,\n    node: error.node || currentNode,\n    http_status: httpError,\n    details: error.details || failedNodeData\n  },\n  \n  // Contexto do dataset\n  context: {\n    priority: dataset.priority || 'unknown',\n    action: dataset.action || 'unknown',\n    version: dataset.version,\n    processing_start: dataset.processing_start,\n    is_critical_dataset: isCriticalDataset\n  },\n  \n  // Informações para recuperação\n  recovery: {\n    retry_recommended: errorType === 'timeout' || errorType === 'connection',\n    manual_check_needed: errorType === 'data_format' || severity === 'critical',\n    skip_dataset: errorType === 'client_error' && httpError === 404\n  },\n  \n  // Metadados técnicos\n  technical_info: {\n    n8n_version: $vars.N8N_VERSION || 'unknown',\n    workflow_version: '1.0.0',\n    environment: 'development',\n    user_agent: 'N8N-ASPI-DataIngestion'\n  }\n};\n\n// Log estruturado para debug\nconsole.log(`❌ ERRO no workflow de ingestão:`);\nconsole.log(`   Dataset: ${errorLog.dataset_id}`);\nconsole.log(`   Tipo: ${errorLog.error.type}`);\nconsole.log(`   Severidade: ${errorLog.error.severity}`);\nconsole.log(`   Nó: ${errorLog.node_name}`);\nconsole.log(`   Mensagem: ${errorLog.error.message}`);\n\nif (errorLog.recovery.retry_recommended) {\n  console.log(`🔄 Retry recomendado para este tipo de erro`);\n}\n\nif (errorLog.recovery.manual_check_needed) {\n  console.log(`⚠️ Verificação manual necessária - erro crítico`);\n}\n\nreturn {json: errorLog};"
+      },
+      "id": "f1f2ad51-d14e-4c7f-8882-a1d24d267170",
+      "name": "Tratar Erros",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        288,
+        144
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "=error:ingestion:{{$now.toMillis()}}",
+        "value": "={{JSON.stringify($json)}}",
+        "expire": true,
+        "ttl": 86400
+      },
+      "id": "f7809a75-0376-4f01-8f27-307ef5ef39f2",
+      "name": "Cache Erro Redis",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        496,
+        144
+      ],
+      "credentials": {
+        "redis": {
+          "id": "mxMZ57xkDreBg3Fx",
+          "name": "AIDE Redis"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8502/?api=monitoring&alert=true",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify({\n  severity: $json.error.severity || 'high',\n  type: 'ingestion_error', \n  dataset_id: $json.dataset_id,\n  workflow: $json.workflow,\n  timestamp: $json.timestamp,\n  error_message: $json.error.message,\n  recovery: $json.recovery,\n  details: $json\n})}}",
+        "options": {}
+      },
+      "id": "d8f59089-bf31-4a16-95b6-65e4e517d5e8",
+      "name": "Enviar Alerta de Erro",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        688,
+        144
+      ],
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "a109e6f0-ddea-4e64-9db3-6048bcbd5db9",
+      "name": "Responder Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1296,
+        -64
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Health Check Sistema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Horário": {
+      "main": [
+        [
+          {
+            "node": "Health Check Sistema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Health Check Sistema": {
+      "main": [
+        [
+          {
+            "node": "Sistema Disponível?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sistema Disponível?": {
+      "main": [
+        [
+          {
+            "node": "Buscar Lista Datasets ONS",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Consultar Datasets BD",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Responder Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consultar Datasets BD": {
+      "main": [
+        [
+          {
+            "node": "Comparar e Priorizar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Lista Datasets ONS": {
+      "main": [
+        [
+          {
+            "node": "Comparar e Priorizar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Comparar e Priorizar": {
+      "main": [
+        [
+          {
+            "node": "Dividir em Lotes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dividir em Lotes": {
+      "main": [
+        [
+          {
+            "node": "Baixar Dados Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Baixar Dados Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Baixar Dados Dataset": {
+      "main": [
+        [
+          {
+            "node": "Validar e Transformar",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Tratar Erros",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar e Transformar": {
+      "main": [
+        [
+          {
+            "node": "Inserir Dados no BD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Inserir Dados no BD": {
+      "main": [
+        [
+          {
+            "node": "Atualizar Status Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Atualizar Status Dataset": {
+      "main": [
+        [
+          {
+            "node": "Coletar Métricas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Coletar Métricas": {
+      "main": [
+        [
+          {
+            "node": "Enviar Métricas p/ Monitoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar Métricas p/ Monitoring": {
+      "main": [
+        [
+          {
+            "node": "Cache Status Redis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache Status Redis": {
+      "main": [
+        [
+          {
+            "node": "Responder Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tratar Erros": {
+      "main": [
+        [
+          {
+            "node": "Cache Erro Redis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache Erro Redis": {
+      "main": [
+        [
+          {
+            "node": "Enviar Alerta de Erro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "aff1cad6-f83a-4e27-b059-c47cc5c20b76",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "99f53688f2ca3771abf2057803b2a6443cbeb2ff6391b066326e326070dbca89"
+  },
+  "id": "dl2hYHZHTZmBTgE6",
+  "tags": []
+}

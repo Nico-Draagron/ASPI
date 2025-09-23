@@ -1,0 +1,847 @@
+{
+  "name": "chat-workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chat/process",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "c4243cff-72eb-4193-887d-15ed24261325",
+      "name": "Webhook Chat Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        -2208,
+        64
+      ],
+      "webhookId": "aide-chat-processor"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Acessar dados diretamente do webhook\nconst webhookData = $('Webhook Chat Request').first().json;\n\nconsole.log('=== WEBHOOK DATA ===');\nconsole.log('webhookData:', JSON.stringify(webhookData, null, 2));\n\n// Extrair dados do body do webhook\nconst data = webhookData.body;\n\nconsole.log('=== EXTRACTED DATA ===');\nconsole.log('data:', JSON.stringify(data, null, 2));\n\nif (!data || !data.message || !data.user_id) {\n  throw new Error(`Mensagem e user_id são obrigatórios. Recebido: ${JSON.stringify(data)}`);\n}\n\n// Sanitização básica\nfunction sanitizeInput(str) {\n  return str\n    .trim()\n    .substring(0, 2000)\n    .replace(/<script[^>]*>.*?<\\/script>/gi, '')\n    .replace(/<[^>]+>/g, '');\n}\n\nconst context = {\n  user_id: data.user_id,\n  session_id: data.session_id || `session_${Date.now()}`,\n  message: sanitizeInput(data.message),\n  original_message: data.message,\n  timestamp: new Date().toISOString(),\n  request_id: `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,\n  metadata: {\n    source: data.source || 'web',\n    language: data.language || 'pt-BR',\n    timezone: data.timezone || 'America/Sao_Paulo',\n    client_info: data.client_info || {},\n    force_refresh: data.force_refresh || false\n  }\n};\n\nreturn {json: context};"
+      },
+      "id": "a523478a-a4ee-4fa7-a98b-240c52c093c0",
+      "name": "Validar e Preparar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2016,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "key": "=session:{{$json.session_id}}",
+        "options": {}
+      },
+      "id": "72f3fb21-0ca9-441f-b5f2-f77addcc7e4a",
+      "name": "Buscar Sessão Cache",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -1808,
+        -48
+      ],
+      "credentials": {
+        "redis": {
+          "id": "mxMZ57xkDreBg3Fx",
+          "name": "AIDE Redis"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  id, \n  session_id, \n  user_id, \n  role, \n  content, \n  metadata, \n  created_at \nFROM chat_history \nWHERE session_id = '{{$json.session_id}}' \nORDER BY created_at DESC \nLIMIT 10",
+        "options": {}
+      },
+      "id": "aae23c09-afb8-465d-a4de-c0fc1b6e8aa6",
+      "name": "Buscar Histórico Chat",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -1808,
+        160
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "lLK1VJvikwFE7C9e",
+          "name": "AIDE PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Acessar dados diretamente do nó \"Validar e Preparar\"\nconst context = $('Validar e Preparar').first().json;\n\nconsole.log('=== DEBUG: Dados recebidos no Analisar Intenção ===');\nconsole.log('context:', JSON.stringify(context, null, 2));\n\n// Validar se message existe e tem conteúdo\nif (!context || !context.message) {\n  throw new Error('Contexto ou mensagem não encontrados. Dados recebidos: ' + JSON.stringify(context));\n}\n\nconst message = context.message.toLowerCase();\n\nconsole.log('Message processada:', message);\n\n// Configuração de intents com patterns melhorados\nconst intents = {\n  carga_energia: {\n    keywords: ['carga', 'consumo', 'demanda', 'energia', 'mw', 'megawatt', 'load'],\n    patterns: [\n      /(?:qual|quanto).{0,20}(?:carga|consumo|demanda)/i,\n      /carga.{0,20}(?:atual|agora|hoje)/i,\n      /energia.{0,20}(?:consumida|utilizada)/i\n    ],\n    confidence: 0\n  },\n  cmo_pld: {\n    keywords: ['cmo', 'pld', 'preco', 'preço', 'custo', 'marginal', 'operacao', 'operação'],\n    patterns: [\n      /(?:qual|quanto).{0,20}(?:cmo|pld|preço|preco)/i,\n      /custo.{0,20}marginal/i,\n      /preço.{0,20}energia/i\n    ],\n    confidence: 0\n  },\n  bandeiras: {\n    keywords: ['bandeira', 'tarifa', 'tarifaria', 'tarifária', 'verde', 'amarela', 'vermelha'],\n    patterns: [\n      /bandeira.{0,20}(?:tarifaria|tarifária|atual)/i,\n      /(?:verde|amarela|vermelha).{0,20}(?:bandeira|tarifa)/i\n    ],\n    confidence: 0\n  },\n  geracao: {\n    keywords: ['geracao', 'geração', 'producao', 'produção', 'usina', 'solar', 'eolica', 'eólica', 'hidreletrica', 'hidrelétrica', 'termica', 'térmica'],\n    patterns: [\n      /(?:geracao|geração|producao|produção).{0,20}(?:energia|eletrica|elétrica)/i,\n      /(?:solar|eolica|eólica|hidro|termica|térmica)/i\n    ],\n    confidence: 0\n  },\n  comparacao: {\n    keywords: ['comparar', 'versus', 'diferenca', 'diferença', 'melhor', 'pior', 'ranking', 'maior', 'menor'],\n    patterns: [\n      /compar(?:ar|ação|e)/i,\n      /(?:melhor|pior|maior|menor).{0,20}(?:região|subsistema|período)/i,\n      /diferenç?a.{0,20}entre/i\n    ],\n    confidence: 0\n  },\n  previsao: {\n    keywords: ['previsao', 'previsão', 'projecao', 'projeção', 'futuro', 'tendencia', 'tendência', 'proximo', 'próximo', 'estimativa'],\n    patterns: [\n      /(?:previsao|previsão|projecao|projeção)/i,\n      /(?:proximo|próximo|futuro).{0,20}(?:mes|mês|semana|dia|ano)/i,\n      /tendênc?ia/i\n    ],\n    confidence: 0\n  }\n};\n\n// Calcular confidence scores\nfor (const [intent, data] of Object.entries(intents)) {\n  // Check keywords\n  data.keywords.forEach(keyword => {\n    if (message.includes(keyword)) {\n      data.confidence += 0.3;\n    }\n  });\n  \n  // Check patterns (mais peso)\n  if (data.patterns) {\n    data.patterns.forEach(pattern => {\n      if (pattern.test(message)) {\n        data.confidence += 0.5;\n      }\n    });\n  }\n  \n  // Normalizar confidence (máximo 1.0)\n  data.confidence = Math.min(1.0, data.confidence);\n}\n\n// Identificar intent primário\nconst sortedIntents = Object.entries(intents)\n  .sort((a, b) => b[1].confidence - a[1].confidence);\n  \nconst primaryIntent = sortedIntents[0];\nconst secondaryIntents = sortedIntents.slice(1, 3)\n  .filter(([_, data]) => data.confidence > 0.3);\n\n// Extração de entidades melhorada\nconst entities = {\n  regions: [],\n  periods: [],\n  metrics: [],\n  values: [],\n  comparisons: []\n};\n\n// Regiões/Subsistemas\nconst regionMap = {\n  'sudeste': ['sudeste', 'se', 'sp', 'rj', 'mg', 'es'],\n  'sul': ['sul', 's', 'pr', 'sc', 'rs'],\n  'nordeste': ['nordeste', 'ne', 'ba', 'pe', 'ce', 'rn', 'pb', 'al', 'se', 'ma', 'pi'],\n  'norte': ['norte', 'n', 'am', 'pa', 'to', 'ro', 'ac', 'ap', 'rr'],\n  'centro-oeste': ['centro-oeste', 'centro oeste', 'co', 'mt', 'ms', 'go', 'df']\n};\n\nfor (const [region, keywords] of Object.entries(regionMap)) {\n  if (keywords.some(kw => message.includes(kw))) {\n    entities.regions.push(region);\n  }\n}\n\n// Períodos temporais\nconst periodPatterns = [\n  { pattern: /hoje/gi, value: 'today', type: 'day' },\n  { pattern: /ontem/gi, value: 'yesterday', type: 'day' },\n  { pattern: /agora/gi, value: 'now', type: 'realtime' },\n  { pattern: /(?:ultima|última) semana/gi, value: 'last_week', type: 'week' },\n  { pattern: /(?:ultimo|último) (?:mes|mês)/gi, value: 'last_month', type: 'month' },\n  { pattern: /este (?:mes|mês)/gi, value: 'this_month', type: 'month' },\n  { pattern: /este ano/gi, value: 'this_year', type: 'year' },\n  { pattern: /\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}/gi, value: 'specific_date', type: 'date' },\n  { pattern: /(janeiro|fevereiro|março|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)/gi, value: 'month_name', type: 'month' }\n];\n\nperiodPatterns.forEach(({pattern, value, type}) => {\n  const matches = message.match(pattern);\n  if (matches) {\n    entities.periods.push({\n      value: value,\n      type: type,\n      text: matches[0]\n    });\n  }\n});\n\n// Valores numéricos\nconst valuePattern = /\\d+(?:[.,]\\d+)?\\s*(?:mw|gwh|r\\$|reais)?/gi;\nconst valueMatches = message.match(valuePattern);\nif (valueMatches) {\n  entities.values = valueMatches;\n}\n\n// Análise de necessidade de dados\nconst requiresData = primaryIntent[1].confidence > 0.3 && !message.match(/^(oi|olá|bom dia|boa tarde|boa noite|tchau|obrigado)/i);\nconst isGreeting = /^(oi|olá|bom dia|boa tarde|boa noite|hi|hello)/i.test(message);\nconst isHelp = /^(ajuda|help|como|tutorial|o que você|o que voce)/i.test(message);\nconst isFarewell = /(tchau|até|ate logo|obrigado|valeu)/i.test(message);\n\n// Verificar se precisa dados mais recentes (com validação)\nconst needsFreshData = (context.metadata && context.metadata.force_refresh) || \n  entities.periods.some(p => ['now', 'realtime', 'today'].includes(p.value));\n\nconst result = {\n  ...context,\n  analysis: {\n    primary_intent: primaryIntent[0],\n    confidence: primaryIntent[1].confidence,\n    secondary_intents: secondaryIntents.map(([name, data]) => ({\n      name,\n      confidence: data.confidence\n    })),\n    all_intents: intents,\n    entities: entities,\n    requires_data: requiresData,\n    needs_fresh_data: needsFreshData,\n    is_greeting: isGreeting,\n    is_help: isHelp,\n    is_farewell: isFarewell,\n    complexity: entities.regions.length > 1 || entities.periods.length > 1 ? 'complex' : 'simple'\n  }\n};\n\nconsole.log('=== RESULTADO FINAL ===');\nconsole.log('Intent detectado:', result.analysis.primary_intent);\nconsole.log('Confidence:', result.analysis.confidence);\n\nreturn {json: result};"
+      },
+      "id": "cfbc9e62-0166-41b1-9dd4-a53308549275",
+      "name": "Analisar Intenção",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1616,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.analysis.requires_data}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "id": "c6ae2bdf-9b19-48d6-a84b-366ce8f4be3a"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9e9b2a37-957d-4a58-902b-b28219ad95a3",
+      "name": "Precisa Dados?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [
+        -1408,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  query_template,\n  parameters,\n  dataset_id,\n  description\nFROM query_templates\nWHERE intent_type = '{{$json.analysis.primary_intent}}'\n  AND active = true\nORDER BY priority DESC\nLIMIT 1",
+        "options": {}
+      },
+      "id": "8d039db2-c0da-431a-9d25-27f1ce1d70ea",
+      "name": "Buscar Template Query",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -1216,
+        -96
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "lLK1VJvikwFE7C9e",
+          "name": "AIDE PostgreSQL"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Obter dados do nó anterior (Buscar Template Query)\nconst inputData = $('Buscar Template Query').first().json;\n// Também precisamos dos dados da análise de intenção\nconst analysisData = $('Analisar Intenção').first().json;\nconst analysis = analysisData.analysis;\nconst intent = analysis.primary_intent;\nconst entities = analysis.entities;\nconst template = inputData;\n\nlet query = '';\n\n// Determinar período - CORRIGIDO para pegar mais dados\nlet startDate = new Date();\nlet endDate = new Date();\n\nif (entities.periods && entities.periods.length > 0) {\n  const period = entities.periods[0];\n  switch(period.value) {\n    case 'today':\n      startDate.setHours(0, 0, 0, 0);\n      break;\n    case 'yesterday':\n      startDate.setDate(startDate.getDate() - 1);\n      endDate = new Date(startDate);\n      break;\n    case 'last_week':\n      startDate.setDate(startDate.getDate() - 7);\n      break;\n    case 'last_month':\n      startDate.setMonth(startDate.getMonth() - 1);\n      break;\n    case 'this_month':\n      startDate.setDate(1);\n      startDate.setHours(0, 0, 0, 0);\n      break;\n    case 'this_year':\n      startDate = new Date(startDate.getFullYear(), 0, 1);\n      break;\n    default:\n      // CORREÇÃO: Para \"últimos 3 meses\", vamos buscar dados de 90 dias atrás\n      startDate.setDate(startDate.getDate() - 90);\n  }\n} else {\n  // CORREÇÃO: Padrão ampliado - últimos 30 dias em vez de 7\n  startDate.setDate(startDate.getDate() - 30);\n}\n\n// Formatear datas para PostgreSQL\nconst startDateStr = `'${startDate.toISOString()}'`;\nconst endDateStr = `'${endDate.toISOString()}'`;\n\n// Query específica para os dados que temos\nif (intent === 'carga_energia') {\n  query = `\n    SELECT \n      dataset_id,\n      period_start,\n      subsystem,\n      metric_name,\n      value,\n      unit,\n      created_at\n    FROM data_records\n    WHERE dataset_id = 'carga_energia'\n      AND period_start >= ${startDateStr}\n    ORDER BY period_start DESC, subsystem;\n  `;\n} else {\n  // Query genérica para qualquer dataset\n  query = `\n    SELECT \n      dataset_id,\n      period_start,\n      subsystem,\n      metric_name,\n      value,\n      unit,\n      created_at\n    FROM data_records\n    WHERE period_start >= ${startDateStr}\n    ORDER BY period_start DESC\n    LIMIT 50;\n  `;\n}\n\nreturn {json: {\n  query: query,\n  dataset_id: template?.dataset_id || intent,\n  check_freshness: analysis.needs_fresh_data || false\n}};"
+      },
+      "id": "e26033c5-0a89-424f-8d48-e8c2acf9ae14",
+      "name": "Construir Query SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1008,
+        -48
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.check_freshness}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "id": "89ead51a-da34-45d9-b084-cf3335812849"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "234466fb-69c5-42ac-b0e4-3897f1522c76",
+      "name": "Verificar Freshness?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [
+        -816,
+        -48
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  MAX(period_start) as last_data,\n  EXTRACT(EPOCH FROM (NOW() - MAX(period_start)))/3600 as hours_old\nFROM data_records\nWHERE dataset_id = '{{$json.dataset_id}}'\n  AND period_start >= NOW() - INTERVAL '48 hours'",
+        "options": {}
+      },
+      "id": "41de3e60-5b17-45e8-b101-90b98163f098",
+      "name": "Verificar Idade Dados",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -608,
+        -144
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "lLK1VJvikwFE7C9e",
+          "name": "AIDE PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.hours_old}}",
+              "rightValue": 24,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              },
+              "id": "a74dd1b1-a547-4452-adfb-db257fe30b21"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "956f5b01-e29d-4f0e-9443-3581c0b79a3f",
+      "name": "Dados Antigos?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [
+        -416,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/data-ingestion/trigger",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify({datasets: [$json.dataset_id], priority: 'high', triggered_by: 'chat_request'})}}",
+        "options": {}
+      },
+      "id": "e90e541b-d76d-49ff-96ea-b63e5f6575fa",
+      "name": "Disparar Ingestão",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -208,
+        -192
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{$json.query}}",
+        "options": {
+          "queryBatching": "single"
+        }
+      },
+      "id": "4be0e9df-771c-499b-85ea-58a93d4aab93",
+      "name": "Executar Query",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -416,
+        -48
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "lLK1VJvikwFE7C9e",
+          "name": "AIDE PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const userMessage = $('Validar e Preparar').first().json.message;\nconst analysisData = $('Analisar Intenção').first().json;\nconst analysis = analysisData.analysis;\nconst queryResults = $('Executar Query').all().map(item => item.json);\n\nlet dataContext = '';\nlet foundData = false;\n\nif (queryResults && queryResults.length > 0) {\n  const data = queryResults.flat();\n  foundData = data.length > 0;\n  \n  if (foundData) {\n    dataContext = `DADOS DISPONÍVEIS NO SISTEMA:\\n\\n`;\n    \n    // Dados de carga de energia\n    const cargaData = data.filter(row => row.dataset_id === 'carga_energia');\n    if (cargaData.length > 0) {\n      dataContext += `CARGA DE ENERGIA (dados de ${cargaData[0].period_start}):\\n`;\n      cargaData.forEach(row => {\n        dataContext += `• ${row.subsystem}: ${row.value} ${row.unit}\\n`;\n      });\n      dataContext += `\\n`;\n    }\n    \n    // Outros dados disponíveis\n    const outrosDados = data.filter(row => row.dataset_id !== 'carga_energia');\n    if (outrosDados.length > 0) {\n      outrosDados.forEach(row => {\n        dataContext += `• ${row.dataset_id.toUpperCase()}: ${row.subsystem} = ${row.value} ${row.unit}\\n`;\n      });\n    }\n  }\n}\n\nconst fullContext = `${userMessage}\n\nINFORMAÇÕES DISPONÍVEIS:\n${foundData ? dataContext : 'Dados não estão carregados no momento.'}\n\nINSTRUÇÕES IMPORTANTES:\n- Você é o AIDE, assistente de dados energéticos do ONS\n- Use APENAS os dados fornecidos acima\n- NÃO mencione \"documentos\" ou \"arquivos não acessíveis\"\n- ${foundData ? 'Analise os dados específicos e forneça insights baseados neles' : 'Informe que os dados solicitados não estão disponíveis no momento'}\n- Sempre responda em português brasileiro`;\n\nconst contextData = $('Validar e Preparar').first().json;\n\nreturn {json: {\n  chatInput: fullContext,\n  text: fullContext,\n  message: fullContext,\n  metadata: {\n    session_id: contextData.session_id,\n    user_id: contextData.user_id,\n    intent: analysis.primary_intent,\n    data_found: foundData\n  }\n}};"
+      },
+      "id": "0dc81b8c-2281-4eba-9285-e9bf325d4c3f",
+      "name": "Preparar Contexto IA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "assistant",
+        "assistantId": {
+          "__rl": true,
+          "value": "asst_ICokn14g86JzLsW7fOLgeVCz",
+          "mode": "id"
+        },
+        "prompt": "define",
+        "text": "={{$json.message || $json.query || $json.text || $json.chatInput}}",
+        "options": {}
+      },
+      "id": "970e4949-0be5-46b0-93d8-4a445cc68ded",
+      "name": "Claude/GPT Response",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.4,
+      "position": [
+        -48,
+        96
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "GOBc6pINnZEDdXGz",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const aiResponse = $json;\nconst metadata = $('Preparar Contexto IA').first().json.metadata;\nconst queryData = $('Executar Query').all().map(item => item.json);\nconst startTime = new Date($('Validar e Preparar').first().json.timestamp);\n\n// Extrair resposta do Assistant\nlet responseContent = '';\nlet functionCall = null;\n\n// O Assistant retorna formato diferente do Chat\nif (aiResponse.text) {\n  responseContent = aiResponse.text;\n} else if (aiResponse.choices && aiResponse.choices[0]) {\n  const choice = aiResponse.choices[0];\n  responseContent = choice.message.content || '';\n  \n  if (choice.message.function_call) {\n    try {\n      functionCall = {\n        name: choice.message.function_call.name,\n        arguments: JSON.parse(choice.message.function_call.arguments)\n      };\n    } catch (e) {\n      console.error('Error parsing function call:', e);\n    }\n  }\n} else {\n  responseContent = String(aiResponse);\n}\n\n// Determinar necessidade de visualização\nconst needsVisualization = functionCall?.name === 'generate_visualization' ||\n  responseContent.toLowerCase().includes('gráfico') ||\n  responseContent.toLowerCase().includes('visualização') ||\n  metadata.intent === 'comparacao' ||\n  (queryData && queryData.length > 5);\n\n// Preparar dados para visualização\nfunction prepareVisualizationData(intent, data) {\n  if (!data || data.length === 0) return null;\n  \n  const flatData = data.flat();\n  \n  if (intent === 'carga_energia') {\n    const timeData = flatData\n      .filter(row => row.period && !row.subsystem?.includes('_stats'))\n      .sort((a, b) => new Date(a.period) - new Date(b.period));\n    \n    if (timeData.length === 0) return null;\n    \n    const subsystems = [...new Set(timeData.map(row => row.subsystem))];\n    \n    return {\n      type: 'line',\n      title: 'Evolução da Carga de Energia',\n      data: {\n        labels: [...new Set(timeData.map(row => new Date(row.period).toISOString()))],\n        datasets: subsystems.map(subsystem => ({\n          label: subsystem,\n          data: timeData\n            .filter(row => row.subsystem === subsystem)\n            .map(row => row.avg_load),\n          borderColor: getColor(subsystem),\n          fill: false\n        }))\n      },\n      options: {\n        responsive: true,\n        scales: {\n          y: {\n            title: {\n              display: true,\n              text: 'Carga (MWmed)'\n            }\n          }\n        }\n      }\n    };\n  } else if (intent === 'cmo_pld') {\n    const priceData = flatData\n      .filter(row => row.period)\n      .sort((a, b) => new Date(a.period) - new Date(b.period));\n    \n    return {\n      type: 'bar',\n      title: 'CMO/PLD por Subsistema',\n      data: {\n        labels: [...new Set(priceData.map(row => row.subsystem))],\n        datasets: [{\n          label: 'Preço Médio (R$/MWh)',\n          data: priceData.map(row => row.avg_price),\n          backgroundColor: 'rgba(54, 162, 235, 0.5)'\n        }]\n      }\n    };\n  } else if (intent === 'bandeiras') {\n    const flagData = flatData.slice(0, 12);\n    \n    return {\n      type: 'line',\n      title: 'Histórico de Bandeiras Tarifárias',\n      data: {\n        labels: flagData.map(row => new Date(row.period).toLocaleDateString('pt-BR')),\n        datasets: [{\n          label: 'Valor (R$/100kWh)',\n          data: flagData.map(row => row.tariff_value),\n          borderColor: 'rgb(255, 99, 132)',\n          stepped: true\n        }]\n      }\n    };\n  }\n  \n  return null;\n}\n\n// Função auxiliar para cores\nfunction getColor(subsystem) {\n  const colors = {\n    'Sudeste': '#1f77b4',\n    'Sul': '#ff7f0e',\n    'Nordeste': '#2ca02c',\n    'Norte': '#d62728',\n    'Centro-Oeste': '#9467bd'\n  };\n  return colors[subsystem] || '#666666';\n}\n\n// Gerar sugestões contextuais\nfunction generateSuggestions(intent, entities) {\n  const suggestions = {\n    'carga_energia': [\n      'Comparar com período anterior',\n      'Ver previsão para próximas horas',\n      'Analisar pico de consumo',\n      entities && entities.regions && entities.regions.length === 0 ? 'Comparar entre regiões' : 'Detalhar dados regionais'\n    ],\n    'cmo_pld': [\n      'Comparar patamares de carga',\n      'Ver histórico semanal',\n      'Analisar tendência de preços',\n      'Comparar com mesmo período ano anterior'\n    ],\n    'bandeiras': [\n      'Ver impacto na conta de luz',\n      'Histórico do último ano',\n      'Previsão para próximo mês',\n      'Comparar com inflação'\n    ],\n    'default': [\n      'Ver dados mais recentes',\n      'Comparar períodos',\n      'Exportar relatório',\n      'Fazer análise detalhada'\n    ]\n  };\n  \n  return suggestions[intent] || suggestions.default;\n}\n\n// Calcular métricas de processamento\nconst processingTime = Date.now() - new Date(startTime).getTime();\n\n// Obter dados da análise\nconst analysisData = $('Analisar Intenção').first().json.analysis;\n\n// Estruturar resposta (versão melhorada e única)\nconst structuredResponse = {\n  session_id: metadata.session_id,\n  user_id: metadata.user_id,\n  request_id: metadata.request_id,\n  response: {\n    text: responseContent,\n    intent: metadata.intent,\n    confidence: analysisData.confidence,\n    data_summary: metadata.statistics || {},\n    raw_data: queryData && queryData.length > 0 ? queryData.flat().slice(0, 100) : [],\n    data_found: queryData && queryData.length > 0 && queryData.flat().length > 0,\n    visualization: needsVisualization ? \n      (functionCall?.arguments || prepareVisualizationData(metadata.intent, queryData)) : \n      null,\n    suggestions: generateSuggestions(\n      metadata.intent,\n      analysisData.entities\n    ),\n    metadata: {\n      processing_time_ms: processingTime,\n      tokens_used: aiResponse.usage?.total_tokens || aiResponse.tokens_used || 0,\n      model: aiResponse.model || 'assistant',\n      data_freshness: metadata.data_age || { status: 'unknown' },\n      function_called: functionCall?.name || null,\n      type: (queryData && queryData.length > 0 && queryData.flat().length > 0) ? 'data_response' : 'simple_response',\n      query_executed: queryData && queryData.length > 0,\n      total_records: queryData ? queryData.flat().length : 0\n    }\n  },\n  success: true\n};\n\nreturn {json: structuredResponse};"
+      },
+      "id": "72ebc6bc-ce79-4aa5-8c19-e948ee236ae8",
+      "name": "Processar Resposta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        192,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO chat_history (\n  session_id, \n  user_id, \n  role, \n  content, \n  metadata, \n  created_at\n) VALUES (\n  '{{$json.session_id}}',\n  '{{$json.user_id || \"anonymous\"}}',\n  'user',\n  '{{$json.message || $json.query || $json.text || $json.chatInput}}',\n  '{{JSON.stringify($json.metadata || {})}}',\n  NOW()\n)\nRETURNING id, session_id, role, content, created_at;",
+        "options": {}
+      },
+      "id": "950e4e11-15e5-4595-bedc-195cb24dab7c",
+      "name": "Salvar Mensagem User",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        400,
+        -48
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "lLK1VJvikwFE7C9e",
+          "name": "AIDE PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schema": "public",
+        "table": "chat_history",
+        "columns": {
+          "0": "s",
+          "1": "e",
+          "2": "s",
+          "3": "s",
+          "4": "i",
+          "5": "o",
+          "6": "n",
+          "7": "_",
+          "8": "i",
+          "9": "d",
+          "10": ",",
+          "11": "u",
+          "12": "s",
+          "13": "e",
+          "14": "r",
+          "15": "_",
+          "16": "i",
+          "17": "d",
+          "18": ",",
+          "19": "r",
+          "20": "o",
+          "21": "l",
+          "22": "e",
+          "23": ",",
+          "24": "c",
+          "25": "o",
+          "26": "n",
+          "27": "t",
+          "28": "e",
+          "29": "n",
+          "30": "t",
+          "31": ",",
+          "32": "m",
+          "33": "e",
+          "34": "t",
+          "35": "a",
+          "36": "d",
+          "37": "a",
+          "38": "t",
+          "39": "a",
+          "40": ",",
+          "41": "c",
+          "42": "r",
+          "43": "e",
+          "44": "a",
+          "45": "t",
+          "46": "e",
+          "47": "d",
+          "48": "_",
+          "49": "a",
+          "50": "t",
+          "mappingMode": "defineBelow",
+          "value": {
+            "session_id": "=={{$('Validar e Preparar').first().json.session_id}}",
+            "user_id": "=={{$('Validar e Preparar').first().json.user_id}}",
+            "role": "assistant",
+            "content": "=={{$('Processar Resposta').first().json.response.text}}",
+            "created_at": "={{new Date().toISOString()}}",
+            "metadata": "={\n  \"model\": \"assistant\",\n  \"processing_time\": {{$('Processar Resposta').first().json.response.metadata.processing_time_ms}},\n  \"intent\": \"{{$('Processar Resposta').first().json.response.intent}}\",\n  \"thread_id\": \"{{$('Claude/GPT Response').first().json.threadId}}\"\n}",
+            "id": 0.1
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "session_id",
+              "displayName": "session_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "user_id",
+              "displayName": "user_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "role",
+              "displayName": "role",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "content",
+              "displayName": "content",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "metadata",
+              "displayName": "metadata",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "ba54db1c-d505-4cff-bbb6-2c913bfbeb5a",
+      "name": "Salvar Resposta IA",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        400,
+        160
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "lLK1VJvikwFE7C9e",
+          "name": "AIDE PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "=session:{{$json.session_id}}",
+        "value": "={{JSON.stringify({\n  session_id: $json.session_id,\n  user_id: $json.user_id,\n  last_message: $json.message || $json.query || $json.text,\n  last_response: $json.choices?.[0]?.message?.content,\n  timestamp: new Date().toISOString(),\n  context: $json\n})}}",
+        "expire": true,
+        "ttl": 7200
+      },
+      "id": "e27be891-ca3a-40e3-a7ab-715466808d07",
+      "name": "Atualizar Cache Sessão",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        592,
+        64
+      ],
+      "credentials": {
+        "redis": {
+          "id": "mxMZ57xkDreBg3Fx",
+          "name": "AIDE Redis"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8502/webhook/monitoring/metrics",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify({\n  workflow_name: 'chat_processing',\n  session_id: $('Webhook Chat Request').first().json.session_id,\n  timestamp: new Date().toISOString(),\n  metrics: {\n    response_time: Date.now() - new Date($('Webhook Chat Request').first().json.timestamp || Date.now()).getTime(),\n    model_used: $('OpenAI Assistant').first().json.model,\n    tokens_used: $('OpenAI Assistant').first().json.usage,\n    success: true,\n    workflow_status: 'completed'\n  },\n  metadata: $('OpenAI Assistant').first().json.usage || {}\n})}}",
+        "options": {}
+      },
+      "id": "022a5f30-9852-4472-86e5-62c05a2d4949",
+      "name": "Enviar Métricas",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        64
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "dafccdd2-b0c1-4ec3-a753-9000bb41e728",
+      "name": "Responder Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        992,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const userMessage = $json.message;\nconst analysis = $json.analysis;\nlet simpleResponse = {};\n\nif (analysis.is_greeting) {\n  simpleResponse = {\n    text: 'Olá! Sou o AIDE, seu assistente para dados do setor elétrico. Como posso ajudá-lo hoje?',\n    suggestions: [\n      'Qual a carga atual do sistema?',\n      'Como está o CMO hoje?',\n      'Status das bandeiras tarifárias',\n      'Comparar consumo entre regiões'\n    ]\n  };\n} else if (analysis.is_help) {\n  simpleResponse = {\n    text: `Posso ajudá-lo com:\\n\n📊 **Análise de Carga de Energia**: Consumo por região, picos, médias\\n💰 **CMO/PLD**: Preços, patamares, tendências\\n🚦 **Bandeiras Tarifárias**: Status atual, histórico, impactos\\n⚡ **Geração**: Fontes de energia, produção\\n💧 **Reservatórios**: Níveis, armazenamento\\n🔄 **Intercâmbio**: Transferências entre regiões\\n\nFaça sua pergunta!`,\n    suggestions: [\n      'Carga de energia do Sudeste',\n      'CMO médio desta semana',\n      'Bandeira tarifária atual',\n      'Comparar geração solar e eólica'\n    ]\n  };\n} else if (analysis.is_farewell) {\n  simpleResponse = {\n    text: 'Foi um prazer ajudá-lo! Volte sempre que precisar de informações sobre o setor elétrico.',\n    suggestions: []\n  };\n} else {\n  simpleResponse = {\n    text: 'Entendi sua pergunta. Vou buscar essas informações para você...',\n    suggestions: [\n      'Ver dados mais detalhados',\n      'Comparar com outro período',\n      'Gerar relatório'\n    ]\n  };\n}\n\nreturn {json: {\n  session_id: $json.session_id,\n  user_id: $json.user_id,\n  request_id: $json.request_id,\n  response: {\n    text: simpleResponse.text,\n    intent: analysis.primary_intent,\n    confidence: analysis.confidence,\n    data: null,\n    visualization: null,\n    suggestions: simpleResponse.suggestions,\n    metadata: {\n      processing_time_ms: Date.now() - new Date($json.timestamp).getTime(),\n      type: 'simple_response'\n    }\n  },\n  success: true\n}};"
+      },
+      "id": "b317d7e8-b8a8-4e40-8d47-563bfa6114be",
+      "name": "Resposta Simples",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1216,
+        160
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Validar e Preparar": {
+      "main": [
+        [
+          {
+            "node": "Buscar Sessão Cache",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Buscar Histórico Chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Sessão Cache": {
+      "main": [
+        [
+          {
+            "node": "Analisar Intenção",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Histórico Chat": {
+      "main": [
+        [
+          {
+            "node": "Analisar Intenção",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analisar Intenção": {
+      "main": [
+        [
+          {
+            "node": "Precisa Dados?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Precisa Dados?": {
+      "main": [
+        [
+          {
+            "node": "Buscar Template Query",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Resposta Simples",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Template Query": {
+      "main": [
+        [
+          {
+            "node": "Construir Query SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Construir Query SQL": {
+      "main": [
+        [
+          {
+            "node": "Verificar Freshness?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verificar Freshness?": {
+      "main": [
+        [
+          {
+            "node": "Verificar Idade Dados",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Executar Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verificar Idade Dados": {
+      "main": [
+        [
+          {
+            "node": "Dados Antigos?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dados Antigos?": {
+      "main": [
+        [
+          {
+            "node": "Disparar Ingestão",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Preparar Contexto IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Executar Query": {
+      "main": [
+        [
+          {
+            "node": "Preparar Contexto IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Contexto IA": {
+      "main": [
+        [
+          {
+            "node": "Claude/GPT Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude/GPT Response": {
+      "main": [
+        [
+          {
+            "node": "Processar Resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Processar Resposta": {
+      "main": [
+        [
+          {
+            "node": "Salvar Mensagem User",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Salvar Resposta IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Salvar Mensagem User": {
+      "main": [
+        [
+          {
+            "node": "Atualizar Cache Sessão",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Salvar Resposta IA": {
+      "main": [
+        [
+          {
+            "node": "Atualizar Cache Sessão",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Atualizar Cache Sessão": {
+      "main": [
+        [
+          {
+            "node": "Enviar Métricas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar Métricas": {
+      "main": [
+        [
+          {
+            "node": "Responder Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Chat Request": {
+      "main": [
+        [
+          {
+            "node": "Validar e Preparar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "cb0b9acc-b303-4eb1-a218-96371269ca3c",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "99f53688f2ca3771abf2057803b2a6443cbeb2ff6391b066326e326070dbca89"
+  },
+  "id": "70FRagIndhDQANpV",
+  "tags": []
+}

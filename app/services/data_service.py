@@ -20,13 +20,13 @@ from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
 
-from models.database import (
+from app.models.database import (
     Dataset, DataRecord, CargaEnergia, CMO, 
     BandeiraTarifariaAcionamento, Reservatorio,
     GeracaoUsina, IntercambioRegional, RegionType
 )
-from utils.validators import validate_date_range, validate_region
-from utils.formatters import format_number, format_percentage
+# from utils.validators import validate_date_range, validate_region
+# from utils.formatters import format_number, format_percentage
 
 # Configuração de logging
 logger = logging.getLogger(__name__)

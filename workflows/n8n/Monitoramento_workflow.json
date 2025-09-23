@@ -1,0 +1,735 @@
+{
+  "name": "Monitoramento_workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes"
+            }
+          ]
+        }
+      },
+      "id": "775b74c8-829f-4854-9f8e-da7a18689b7a",
+      "name": "Check a cada 5 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -2176,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "monitoring/metrics",
+        "responseMode": "immediateResponse",
+        "options": {}
+      },
+      "id": "f2cb967c-03a8-4feb-a346-c275da7e1547",
+      "name": "Webhook Receber Métricas",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        -2176,
+        464
+      ],
+      "webhookId": "aide-metrics-receiver"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "monitoring/alert",
+        "responseMode": "immediateResponse",
+        "options": {}
+      },
+      "id": "26afce95-6d22-4815-ad6a-66feec9cbda0",
+      "name": "Webhook Receber Alertas",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        -2176,
+        656
+      ],
+      "webhookId": "aide-alert-receiver"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Definir métricas a monitorar com thresholds dinâmicos\nconst metrics = [\n  {\n    name: 'database_health',\n    query: 'SELECT 1 as health',\n    type: 'postgres',\n    threshold: null,\n    critical: true,\n    description: 'Verificar conexão com PostgreSQL'\n  },\n  {\n    name: 'redis_health',\n    command: 'PING',\n    type: 'redis',\n    expected: 'PONG',\n    critical: true,\n    description: 'Verificar conexão com Redis'\n  },\n  {\n    name: 'data_freshness',\n    query: `\n      SELECT \n        dataset_id, \n        MAX(period_start) as last_update,\n        EXTRACT(EPOCH FROM (NOW() - MAX(period_start)))/3600 as hours_since_update\n      FROM data_records\n      WHERE dataset_id IN ('carga_energia', 'cmo_pld', 'bandeiras_tarifarias')\n      GROUP BY dataset_id\n    `,\n    type: 'postgres',\n    threshold: 24,\n    critical: false,\n    description: 'Verificar atualização dos dados críticos'\n  },\n  {\n    name: 'error_rate',\n    query: `\n      SELECT \n        COUNT(*) as error_count,\n        COUNT(CASE WHEN created_at > NOW() - INTERVAL '1 hour' THEN 1 END) as recent_errors,\n        COUNT(CASE WHEN severity = 'critical' THEN 1 END) as critical_errors\n      FROM error_logs\n      WHERE created_at > NOW() - INTERVAL '24 hours'\n    `,\n    type: 'postgres',\n    threshold: 100,\n    critical: false,\n    description: 'Taxa de erros do sistema'\n  },\n  {\n    name: 'api_response_time',\n    url: 'http://localhost:8501/api/health',\n    type: 'http',\n    timeout: 5000,\n    threshold: 3000,\n    critical: false,\n    description: 'Tempo de resposta da API'\n  },\n  {\n    name: 'disk_usage',\n    query: `\n      SELECT \n        pg_database_size('aide_db')/1024/1024 as size_mb,\n        pg_database_size('aide_db')/1024/1024/1024 as size_gb,\n        (pg_database_size('aide_db')::float / \n         pg_settings.setting::bigint)::float * 100 as usage_percent\n      FROM pg_settings\n      WHERE name = 'shared_buffers'\n    `,\n    type: 'postgres',\n    threshold: 10000,\n    critical: false,\n    description: 'Uso de disco do banco de dados'\n  },\n  {\n    name: 'active_sessions',\n    command: `EVAL \"return #redis.call('KEYS', 'session:*')\" 0`,\n    type: 'redis',\n    threshold: 1000,\n    critical: false,\n    description: 'Sessões ativas no sistema'\n  },\n  {\n    name: 'ingestion_status',\n    query: `\n      SELECT \n        dataset_id,\n        last_updated,\n        CASE \n          WHEN last_updated > NOW() - INTERVAL '1 hour' THEN 'recent'\n          WHEN last_updated > NOW() - INTERVAL '24 hours' THEN 'ok'\n          ELSE 'stale'\n        END as status\n      FROM datasets\n      WHERE source_type = 'ONS'\n        AND deleted_at IS NULL\n    `,\n    type: 'postgres',\n    threshold: null,\n    critical: false,\n    description: 'Status da ingestão de dados'\n  },\n  {\n    name: 'chat_usage',\n    query: `\n      SELECT \n        COUNT(*) as total_messages,\n        COUNT(DISTINCT session_id) as unique_sessions,\n        COUNT(DISTINCT user_id) as unique_users,\n        AVG(CASE WHEN role = 'assistant' \n            THEN LENGTH(content) END) as avg_response_length\n      FROM chat_history\n      WHERE created_at > NOW() - INTERVAL '1 hour'\n    `,\n    type: 'postgres',\n    threshold: null,\n    critical: false,\n    description: 'Uso do chat na última hora'\n  }\n];\n\nreturn metrics.map(m => ({json: m}));"
+      },
+      "id": "92929fdc-8a34-4827-8032-209bffe7fdd3",
+      "name": "Definir Métricas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1984,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "5074314f-3ef2-41cb-8099-98eb0d5b5004",
+      "name": "Processar Métricas",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1776,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.type}}",
+                    "rightValue": "postgres",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "postgres"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.type}}",
+                    "rightValue": "redis",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "redis"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.type}}",
+                    "rightValue": "http",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "http"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "88c48bcf-f51c-476c-b64b-2ce88517319c",
+      "name": "Tipo de Métrica",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -1584,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{$json.query}}",
+        "options": {}
+      },
+      "id": "dbad613e-0656-49af-9e16-8b261df152dc",
+      "name": "Check PostgreSQL",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -1376,
+        160
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "lLK1VJvikwFE7C9e",
+          "name": "AIDE PostgreSQL"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeCommand"
+      },
+      "id": "4f0c9230-035e-4900-96f5-62969e71a892",
+      "name": "Check Redis",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -1376,
+        256
+      ],
+      "credentials": {
+        "redis": {
+          "id": "mxMZ57xkDreBg3Fx",
+          "name": "AIDE Redis"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "={{$json.url}}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          },
+          "timeout": "={{$json.timeout}}"
+        }
+      },
+      "id": "2bd72132-48e4-4aff-a404-ff59ce6acb23",
+      "name": "Check HTTP",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1376,
+        352
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const metric = $('process-metrics').first().json;\nconst result = $input.first().json;\nconst checkTime = new Date();\n\nlet status = 'ok';\nlet value = null;\nlet message = '';\nlet details = {};\n\n// Verificar se houve erro\nif (result.error) {\n  status = 'error';\n  message = result.error?.message || 'Check failed';\n  details.error = result.error;\n} else {\n  // Processar resultado por tipo de métrica\n  switch(metric.type) {\n    case 'postgres':\n      if (Array.isArray(result) && result.length > 0) {\n        const data = result[0];\n        \n        // Para métricas com threshold\n        if (metric.threshold) {\n          const metricValue = data[Object.keys(data)[0]];\n          value = metricValue;\n          \n          if (typeof metricValue === 'number' && metricValue > metric.threshold) {\n            status = 'warning';\n            message = `Valor ${metricValue} excede threshold ${metric.threshold}`;\n          }\n        }\n        \n        // Para data_freshness\n        if (metric.name === 'data_freshness') {\n          const staleDatasets = result.filter(row => row.hours_since_update > 24);\n          if (staleDatasets.length > 0) {\n            status = 'warning';\n            message = `Datasets desatualizados: ${staleDatasets.map(d => d.dataset_id).join(', ')}`;\n            details.stale_datasets = staleDatasets;\n          }\n        }\n        \n        // Para error_rate\n        if (metric.name === 'error_rate' && data.critical_errors > 0) {\n          status = 'warning';\n          message = `${data.critical_errors} erros críticos nas últimas 24h`;\n          value = data.error_count;\n        }\n        \n        // Para ingestion_status\n        if (metric.name === 'ingestion_status') {\n          const staleDatasets = result.filter(row => row.status === 'stale');\n          if (staleDatasets.length > 0) {\n            status = 'warning';\n            message = `${staleDatasets.length} datasets sem atualização há mais de 24h`;\n            details.datasets = staleDatasets;\n          }\n        }\n        \n        // Para chat_usage\n        if (metric.name === 'chat_usage') {\n          value = data.total_messages;\n          details = data;\n        }\n      }\n      break;\n      \n    case 'redis':\n      if (metric.expected) {\n        if (result !== metric.expected) {\n          status = 'error';\n          message = `Esperado ${metric.expected}, recebido ${result}`;\n        }\n      } else if (metric.threshold) {\n        // Para contagem (como sessões ativas)\n        value = typeof result === 'number' ? result : (Array.isArray(result) ? result.length : 0);\n        if (value > metric.threshold) {\n          status = 'warning';\n          message = `Contagem ${value} excede threshold ${metric.threshold}`;\n        }\n      }\n      break;\n      \n    case 'http':\n      const responseTime = result.responseTime || \n        (result.timings ? result.timings.total : 0);\n      const statusCode = result.statusCode || result.status;\n      \n      value = responseTime;\n      details = {\n        statusCode: statusCode,\n        responseTime: responseTime\n      };\n      \n      if (statusCode !== 200 && statusCode !== 201) {\n        status = 'error';\n        message = `HTTP ${statusCode}`;\n      } else if (metric.threshold && responseTime > metric.threshold) {\n        status = 'warning';\n        message = `Resposta lenta: ${responseTime}ms`;\n      }\n      break;\n  }\n}\n\n// Determinar severidade\nconst severity = \n  (metric.critical && status === 'error') ? 'critical' :\n  (status === 'error') ? 'high' :\n  (status === 'warning') ? 'medium' : 'low';\n\n// Adicionar contexto baseado no histórico (se disponível)\nconst previousStatus = $('get-previous-status').first()?.json;\nif (previousStatus) {\n  if (previousStatus.status === 'ok' && status !== 'ok') {\n    details.status_change = 'degraded';\n    details.previous_status = previousStatus.status;\n  } else if (previousStatus.status !== 'ok' && status === 'ok') {\n    details.status_change = 'recovered';\n    details.previous_status = previousStatus.status;\n  }\n}\n\nreturn {json: {\n  metric_name: metric.name,\n  metric_description: metric.description,\n  status: status,\n  value: value,\n  message: message,\n  severity: severity,\n  timestamp: checkTime.toISOString(),\n  details: {\n    type: metric.type,\n    threshold: metric.threshold,\n    critical: metric.critical,\n    raw_result: result,\n    ...details\n  }\n}};"
+      },
+      "id": "5a93826f-eae0-489d-87ca-3accbec23160",
+      "name": "Avaliar Resultado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1184,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "key": "=metric:status:{{$json.metric_name}}",
+        "options": {}
+      },
+      "id": "3be2ea9d-5bfd-4bd5-97a8-5aa00dd3312e",
+      "name": "Buscar Status Anterior",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -1184,
+        112
+      ],
+      "credentials": {
+        "redis": {
+          "id": "mxMZ57xkDreBg3Fx",
+          "name": "AIDE Redis"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "schema": "public",
+        "table": "monitoring_metrics",
+        "columns": "metric_name,status,value,message,severity,timestamp,details",
+        "options": {}
+      },
+      "id": "fb992ee1-ea42-445f-9f2f-a789bffbf180",
+      "name": "Salvar Métrica",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -976,
+        256
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "lLK1VJvikwFE7C9e",
+          "name": "AIDE PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "=metric:status:{{$json.metric_name}}",
+        "value": "={{JSON.stringify({status: $json.status, value: $json.value, timestamp: $json.timestamp})}}",
+        "expire": true,
+        "ttl": 900
+      },
+      "id": "c322f4ab-f411-4b76-893a-47f163d0f25a",
+      "name": "Cache Status Métrica",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -784,
+        256
+      ],
+      "credentials": {
+        "redis": {
+          "id": "mxMZ57xkDreBg3Fx",
+          "name": "AIDE Redis"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.status}}",
+              "rightValue": "ok",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "fe5e5398-2f6f-48f9-bffc-5f84cf1e8318",
+      "name": "Precisa Alertar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [
+        -560,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "fieldsToAggregate": {
+          "fieldToAggregate": [
+            {}
+          ]
+        },
+        "options": {}
+      },
+      "id": "80c21ea5-4ee9-4cea-a6f5-d770abee3fb6",
+      "name": "Aguardar Todas",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        -384,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const alerts = $input.all().map(item => item.json);\nconst timestamp = new Date();\n\n// Agrupar alertas por severidade\nconst grouped = {\n  critical: [],\n  high: [],\n  medium: [],\n  low: []\n};\n\nalerts.forEach(alert => {\n  if (grouped[alert.severity]) {\n    grouped[alert.severity].push(alert);\n  }\n});\n\n// Construir mensagem de alerta\nlet message = '🚨 **ALERTA - AIDE - Monitoramento**\\n\\n';\nmessage += `📅 ${timestamp.toLocaleString('pt-BR')}\\n\\n`;\n\nif (grouped.critical.length > 0) {\n  message += '🔴 **CRÍTICO**\\n';\n  grouped.critical.forEach(a => {\n    message += `• ${a.metric_description || a.metric_name}: ${a.message}\\n`;\n  });\n  message += '\\n';\n}\n\nif (grouped.high.length > 0) {\n  message += '🟠 **ALTO**\\n';\n  grouped.high.forEach(a => {\n    message += `• ${a.metric_description || a.metric_name}: ${a.message}\\n`;\n  });\n  message += '\\n';\n}\n\nif (grouped.medium.length > 0) {\n  message += '🟡 **MÉDIO**\\n';\n  grouped.medium.forEach(a => {\n    message += `• ${a.metric_description || a.metric_name}: ${a.message}\\n`;\n  });\n  message += '\\n';\n}\n\n// Adicionar informações sobre mudanças de status\nconst statusChanges = alerts.filter(a => a.details?.status_change);\nif (statusChanges.length > 0) {\n  message += '📊 **Mudanças de Status**\\n';\n  statusChanges.forEach(a => {\n    const emoji = a.details.status_change === 'recovered' ? '✅' : '⚠️';\n    message += `${emoji} ${a.metric_name}: ${a.details.status_change}\\n`;\n  });\n  message += '\\n';\n}\n\n// Determinar canais de notificação\nconst channels = [];\nif (grouped.critical.length > 0) {\n  channels.push('telegram', 'email', 'slack', 'webhook');\n} else if (grouped.high.length > 0) {\n  channels.push('telegram', 'slack');\n} else {\n  channels.push('slack');\n}\n\n// Adicionar recomendações\nconst recommendations = [];\nalerts.forEach(a => {\n  if (a.metric_name === 'data_freshness' && a.status !== 'ok') {\n    recommendations.push('Verificar processo de ingestão de dados');\n  }\n  if (a.metric_name === 'disk_usage' && a.value > 8000) {\n    recommendations.push('Considerar limpeza de dados antigos ou expansão de armazenamento');\n  }\n  if (a.metric_name === 'error_rate' && a.value > 50) {\n    recommendations.push('Revisar logs de erro para identificar padrões de falha');\n  }\n  if (a.metric_name === 'api_response_time' && a.status === 'warning') {\n    recommendations.push('Otimizar queries ou aumentar recursos do servidor');\n  }\n});\n\nif (recommendations.length > 0) {\n  message += '💡 **Recomendações**\\n';\n  recommendations.forEach(r => {\n    message += `• ${r}\\n`;\n  });\n}\n\nreturn {json: {\n  message: message,\n  channels: channels,\n  alert_count: alerts.length,\n  critical_count: grouped.critical.length,\n  high_count: grouped.high.length,\n  medium_count: grouped.medium.length,\n  alerts: grouped,\n  recommendations: recommendations,\n  timestamp: timestamp.toISOString()\n}};"
+      },
+      "id": "e726756b-0183-4224-910e-e28f47d8a380",
+      "name": "Preparar Alerta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -176,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Canais de Notificação\nCondicional baseado em severidade",
+        "height": 80,
+        "width": 200
+      },
+      "id": "08c656ab-6721-4a48-8bcd-19ea0eda9a46",
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.channels}}",
+              "rightValue": "telegram",
+              "operator": {
+                "type": "array",
+                "operation": "contains",
+                "rightType": "string"
+              },
+              "id": "5afa3097-9a6e-415b-9e21-51796ee0162d"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d9a544bd-df39-4f5f-8c07-801b383bf085",
+      "name": "Enviar Telegram?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [
+        32,
+        64
+      ],
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.channels}}",
+              "rightValue": "slack",
+              "operator": {
+                "type": "array",
+                "operation": "contains",
+                "rightType": "string"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4c47265a-defd-4acf-b46a-c458c28dc6c2",
+      "name": "Enviar Slack?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [
+        32,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Processar métricas externas recebidas via webhook\nconst input = $input.first().json;\nconst timestamp = new Date();\n\n// Validar entrada\nif (!input.workflow_name || !input.metrics) {\n  throw new Error('workflow_name e metrics são obrigatórios');\n}\n\n// Processar métricas por workflow\nlet processedMetric = {};\n\nswitch(input.workflow_name) {\n  case 'data_ingestion':\n    processedMetric = {\n      metric_name: `ingestion_${input.dataset_id || 'unknown'}`,\n      metric_description: `Ingestão de dados: ${input.dataset_name || input.dataset_id}`,\n      status: input.status || 'unknown',\n      value: input.records_processed || 0,\n      message: `${input.action || 'processed'} ${input.records_processed || 0} registros em ${input.processing_time_ms || 0}ms`,\n      severity: input.status === 'error' ? 'high' : 'low',\n      timestamp: timestamp.toISOString(),\n      details: {\n        workflow: 'data_ingestion',\n        batch_id: input.batch_id,\n        priority: input.priority,\n        ...input.metadata\n      }\n    };\n    break;\n    \n  case 'chat_processing':\n    const metrics = input.metrics;\n    processedMetric = {\n      metric_name: 'chat_request',\n      metric_description: 'Processamento de chat',\n      status: 'ok',\n      value: metrics.processing_time_ms || 0,\n      message: `Chat processado em ${metrics.processing_time_ms}ms, ${metrics.tokens_used || 0} tokens`,\n      severity: 'low',\n      timestamp: timestamp.toISOString(),\n      details: {\n        workflow: 'chat_processing',\n        model: metrics.model,\n        tokens: metrics.tokens_used,\n        data_freshness: metrics.data_freshness,\n        function_called: metrics.function_called\n      }\n    };\n    break;\n    \n  default:\n    processedMetric = {\n      metric_name: input.metric_name || 'external_metric',\n      metric_description: input.description || 'Métrica externa',\n      status: input.status || 'unknown',\n      value: input.value || 0,\n      message: input.message || 'Métrica recebida',\n      severity: input.severity || 'low',\n      timestamp: timestamp.toISOString(),\n      details: input\n    };\n}\n\nreturn {json: processedMetric};"
+      },
+      "id": "6ce17a7a-1203-4f24-8617-f653e4be5d5f",
+      "name": "Processar Métrica Externa",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1984,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Gerar relatório consolidado de saúde do sistema\nconst allMetrics = $('save-metric').all().map(item => item.json);\nconst timestamp = new Date();\n\n// Calcular estatísticas\nconst stats = {\n  total_checks: allMetrics.length,\n  healthy: allMetrics.filter(m => m.status === 'ok').length,\n  warnings: allMetrics.filter(m => m.status === 'warning').length,\n  errors: allMetrics.filter(m => m.status === 'error').length,\n  critical: allMetrics.filter(m => m.severity === 'critical').length\n};\n\n// Calcular health score (0-100)\nlet healthScore = 100;\nstats.errors > 0 && (healthScore -= stats.errors * 10);\nstats.warnings > 0 && (healthScore -= stats.warnings * 5);\nstats.critical > 0 && (healthScore -= stats.critical * 20);\nhealthScore = Math.max(0, healthScore);\n\n// Determinar status geral\nlet overallStatus = 'healthy';\nif (healthScore < 50 || stats.critical > 0) {\n  overallStatus = 'critical';\n} else if (healthScore < 75 || stats.errors > 0) {\n  overallStatus = 'degraded';\n} else if (healthScore < 90 || stats.warnings > 0) {\n  overallStatus = 'warning';\n}\n\n// Agrupar métricas por categoria\nconst categorizedMetrics = {\n  infrastructure: [],\n  data: [],\n  application: [],\n  usage: []\n};\n\nallMetrics.forEach(m => {\n  const category = \n    ['database_health', 'redis_health', 'disk_usage'].includes(m.metric_name) ? 'infrastructure' :\n    ['data_freshness', 'ingestion_status'].includes(m.metric_name) ? 'data' :\n    ['api_response_time', 'error_rate', 'active_sessions'].includes(m.metric_name) ? 'application' :\n    'usage';\n    \n  categorizedMetrics[category].push({\n    name: m.metric_name,\n    status: m.status,\n    value: m.value,\n    message: m.message\n  });\n});\n\n// Gerar recomendações baseadas no estado atual\nconst recommendations = [];\n\nif (stats.critical > 0) {\n  recommendations.push({\n    priority: 'high',\n    action: 'Investigar imediatamente os alertas críticos'\n  });\n}\n\nallMetrics.forEach(m => {\n  if (m.metric_name === 'data_freshness' && m.status !== 'ok') {\n    recommendations.push({\n      priority: 'medium',\n      action: 'Verificar processo de ingestão de dados',\n      details: m.details?.stale_datasets\n    });\n  }\n  \n  if (m.metric_name === 'disk_usage' && m.value > 8000) {\n    recommendations.push({\n      priority: 'medium',\n      action: 'Planejar limpeza de dados ou expansão de armazenamento',\n      details: `Uso atual: ${m.value}MB`\n    });\n  }\n  \n  if (m.metric_name === 'error_rate' && m.value > 50) {\n    recommendations.push({\n      priority: 'high',\n      action: 'Analisar logs de erro para identificar causa raiz',\n      details: m.details\n    });\n  }\n});\n\n// Criar relatório completo\nconst report = {\n  timestamp: timestamp.toISOString(),\n  health_score: healthScore,\n  status: overallStatus,\n  statistics: stats,\n  categories: categorizedMetrics,\n  metrics_summary: allMetrics.map(m => ({\n    name: m.metric_name,\n    status: m.status,\n    value: m.value,\n    severity: m.severity,\n    message: m.message\n  })),\n  recommendations: recommendations,\n  metadata: {\n    check_interval: '5 minutes',\n    last_check: timestamp.toISOString(),\n    version: '1.0.0'\n  }\n};\n\nreturn {json: report};"
+      },
+      "id": "85000956-2d75-49c4-942f-db320c5c3605",
+      "name": "Gerar Relatório",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        432,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "health:latest",
+        "value": "={{JSON.stringify($json)}}",
+        "expire": true,
+        "ttl": 600
+      },
+      "id": "1c8896d1-14e7-4f1b-9ac7-c5b3c0e26bc5",
+      "name": "Cache Health Report",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        624,
+        352
+      ],
+      "credentials": {
+        "redis": {
+          "id": "mxMZ57xkDreBg3Fx",
+          "name": "AIDE Redis"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8501/api/health-report",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify($json)}}",
+        "options": {}
+      },
+      "id": "d8f78388-d78a-4953-a026-7bc88f3c8352",
+      "name": "Enviar Report p/ API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        832,
+        352
+      ],
+      "continueOnFail": true
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Check a cada 5 min": {
+      "main": [
+        [
+          {
+            "node": "Definir Métricas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Definir Métricas": {
+      "main": [
+        [
+          {
+            "node": "Processar Métricas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tipo de Métrica": {
+      "main": [
+        [
+          {
+            "node": "Check PostgreSQL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Redis",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check HTTP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check PostgreSQL": {
+      "main": [
+        [
+          {
+            "node": "Buscar Status Anterior",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Redis": {
+      "main": [
+        [
+          {
+            "node": "Buscar Status Anterior",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check HTTP": {
+      "main": [
+        [
+          {
+            "node": "Buscar Status Anterior",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Status Anterior": {
+      "main": [
+        [
+          {
+            "node": "Avaliar Resultado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Avaliar Resultado": {
+      "main": [
+        [
+          {
+            "node": "Salvar Métrica",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Salvar Métrica": {
+      "main": [
+        [
+          {
+            "node": "Cache Status Métrica",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache Status Métrica": {
+      "main": [
+        [
+          {
+            "node": "Buscar Status Anterior",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Precisa Alertar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Precisa Alertar?": {
+      "main": [
+        [
+          {
+            "node": "Aguardar Todas",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gerar Relatório",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardar Todas": {
+      "main": [
+        [
+          {
+            "node": "Preparar Alerta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Alerta": {
+      "main": [
+        [
+          {
+            "node": "Enviar Slack?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Enviar Telegram?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gerar Relatório": {
+      "main": [
+        [
+          {
+            "node": "Cache Health Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache Health Report": {
+      "main": [
+        [
+          {
+            "node": "Enviar Report p/ API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a63a98e3-c3c6-4c2c-a234-dd21e497f209",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "99f53688f2ca3771abf2057803b2a6443cbeb2ff6391b066326e326070dbca89"
+  },
+  "id": "066RrSUy7Jf8iLfd",
+  "tags": []
+}

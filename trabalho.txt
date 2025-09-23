@@ -1,0 +1,89 @@
+Trabalho 1 – Inteligência Artificial II 2025/02
+Projeto prático de IA aplicado a um ou mais datasets (a ser validado com a
+professor previamente), utilizando algoritmos de ML para dados tabulares. A integração
+com modelos de IA generativa e/ou setup de workflows inteligentes (ex.: n8n) é opcional e
+será considerada um extra, desde que não substitua o componente de ML clássico.
+Etapas (checklist) – Checklist trabalho I - Inteligência Artificial II 2025/02
+1. Proposta
+○ Definir problema e objetivo.
+○ Apresentar link do dataset e justificativa de uso.
+○ Explicitar a métrica principal de avaliação.
+○ Apontar riscos (ex.: vazamento de dados, desbalanceamento, dados
+faltantes).
+2. Dados
+○ EDA breve.
+○ Pré-processamento (limpeza e tratamento de faltantes/outliers).
+○ Engenharia de atributos.
+○ Divisão em treino/validação (+ cross-validation) ou treino/validação/teste,
+sem vazamento.
+3. Modelos (IA tradicional)
+○ Treinar e comparar algoritmos clássicos, registrar hiperparâmetros,
+baseline e esquema de validação.
+○ Número mínimo de algoritmos depende da formação do grupo:
+i. Individual: ≥ 1 algoritmo.
+ii. Dupla: ≥ 2 algoritmos.
+iii. Trio: ≥ 3 algoritmos.
+○ Problema pode ser de classificação, regressão ou clustering.
+○ Exemplos vistos em aula:
+i. Classificação/Regressão: KNN, Árvore de decisão, Random Forest,
+SVM, XGBoost/LightGBM/CatBoost.
+ii. Clustering: K-Means, DBSCAN.
+○ Sistemas de recomendação podem ser escolhidos como tema alternativo
+(validar com professor).
+4. Avaliação
+○ Métricas adequadas (ex.: Accuracy/F1/ROC-AUC; MAE/RMSE;
+silhouette/DBI; NDCG/P@K).
+○ Avaliar underfitting e overfitting:
+i. Comparar desempenho em treino vs. validação/teste.
+ii. Identificar sinais de modelo muito simples (underfit) ou
+excessivamente ajustado (overfit).
+iii. Apresentar gráficos (learning curves, erros em treino/teste).
+○ Apresentar curvas, tabelas e comparação honesta com baseline.
+ Faculdade Antonio Meneghetti | AMF’
+ Sistemas de Informação
+5. Interpretação
+○ SHAP e/ou LIME (quando aplicável).
+○ Clustering: interpretação de perfis dos clusters.
+○ Árvores: regras ou importâncias.
+6. Refinamento
+○ Ajustes baseados nos achados (ex.: tuning simples, novos atributos).
+○ Mostrar comparação antes/depois.
+7. (Opcional) Automação
+○ n8n para ETL, rodar pipeline ou gerar relatório.
+○ Integração com agente de IA generativa pode apoiar (ex.: resumos, relatórios
+em linguagem natural), mas não substitui a parte de ML.
+8. Relatório e apresentação
+○ Relatório técnico em PDF (7-10 págs., modelo abaixo).
+○ Slides de apresentação (8 slides: Problema → Dados → Pipeline → Modelos
+→ Resultados → Interpretação → Limitações → Próximos passos).
+Modelo de3
+Entregáveis
+1. Repositório GitHub (código executável, README, dependências, dados ou
+instruções de download, export do n8n se usado). Subir na em /reports:
+○ PDF (modelo acima);
+○ Slides (10-15 min).
+Orientações
+● Acompanhamento: Checklist trabalho I - Inteligência Artificial II 2025/02 (fazer uma cópia
+para seu drive e compartilhar com o professor).
+● Trabalho a ser desenvolvido individualmente, duplas ou trios.
+● Data de entrega: até dia 23/09/2025 (terça-feira) às 12h00m.
+● Forma de entrega: Link do repositório do GitHub postado na tarefa do Google
+Classroom (relatório em slides devem estar no repositório). Repositórios privados
+devem ser compartilhados com usuário rwfazul.
+● O relatório deve ser escrito de forma que permita a reprodutibilidade: outro leitor
+deve conseguir refazer os experimentos a partir das instruções e do código. A
+entrega do relatório técnico, redigido conforme o modelo fornecido, é
+obrigatória. Trabalhos que apresentarem apenas documentação no repositório (ex.:
+README) não serão aceitos.
+ Faculdade Antonio Meneghetti | AMF’
+ Sistemas de Informação
+● Trabalhos com indícios de cópia ou plágio receberão nota zero. Em caso de
+suspeita, o professor poderá solicitar uma explicação detalhada sobre a
+implementação realizada.
+○ O uso de ferramentas de IA é permitido, desde que feito com
+responsabilidade. Utilize-as para aprofundar seu entendimento e buscar
+referências, mas nunca como substituto do seu raciocínio. Entenda e avalie
+criticamente as respostas geradas, confrontando-as com os conceitos
+discutidos ao longo da disciplina.
+○ Incluir link do chat da conversa e interações com IA generativa nas
+referências do relatório desenvolvido.
